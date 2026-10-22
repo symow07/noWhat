@@ -1,0 +1,34 @@
+{
+  "name": "nowhat",
+  "version": "0.3.0",
+  "description": "noWhat: for when you open a project and think… now what? A sidebar that shows where a project stands, what's next and what waits on you, worked out from the code, git, tests and live config",
+  "author": {
+    "name": "symow07",
+    "url": "https://github.com/symow07"
+  },
+  "homepage": "https://github.com/symow07/noWhat",
+  "repository": "https://github.com/symow07/noWhat",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "vibe-coding",
+    "project-tracking",
+    "developer-tools"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "run_tests": {
+      "type": "boolean",
+      "title": "Run test suites",
+      "description": "Let Nowhat run the project's own test commands during setup to prove which features work",
+      "default": true
+    },
+    "check_hosts": {
+      "type": "boolean",
+      "title": "Check deploy config",
+      "description": "Ask your deploy host's CLI (Railway, EAS, Vercel, Fly, Netlify) which env var names are set. Names only, never values",
+      "default": true
+    }
+  }
+}

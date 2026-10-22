@@ -1,0 +1,12 @@
+{
+  "name": "nowhat",
+  "owner": { "name": "symow07" },
+  "metadata": { "description": "noWhat: for when you open a project and think… now what?" },
+  "plugins": [
+    {
+      "name": "nowhat",
+      "source": "./",
+      "description": "noWhat: a Claude Code sidebar that shows where a project stands, what's next and what waits on you, worked out from the code, git, tests and live config"
+    }
+  ]
+}

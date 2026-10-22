@@ -1,0 +1,9 @@
+{
+  "expo": {
+    "name": "Acme Notes",
+    "slug": "acme-notes",
+    "icon": "./assets/icon.png",
+    "ios": { "bundleIdentifier": "example.acme.notes" },
+    "plugins": [["expo-image-picker", { "photosPermission": "Attach photos to your notes." }]]
+  }
+}

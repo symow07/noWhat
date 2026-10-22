@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "checked_at": "@-1m",
+  "hosts_checked_at": null,
+  "project": { "languages": ["TypeScript"], "frameworks": ["Expo", "React", "React Native", "RevenueCat"], "hosts": [], "test_commands": [], "tests": [], "file_count": 0, "screens": 0, "routes": 0, "git": true },
+  "hosts": [],
+  "live": null,
+  "test_runs": [],
+  "test_results": {
+    "src/lib/auth.spec.ts": { "ok": true, "at": "@-1d" },
+    "src/lib/notes.spec.ts": { "ok": true, "at": "@-1d" },
+    "src/lib/editor.spec.ts": { "ok": true, "at": "@-1d" },
+    "src/lib/sync.spec.ts": { "ok": false, "at": "@-2h" },
+    "src/lib/account.spec.ts": { "ok": true, "at": "@-1d" },
+    "src/lib/settings.spec.ts": { "ok": true, "at": "@-1d" }
+  },
+  "features": {}
+}

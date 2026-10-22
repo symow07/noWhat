@@ -1,0 +1,127 @@
+{
+  "schema_version": 2,
+  "project_id": "demo-acme-notes",
+  "name": "Acme Notes",
+  "last_touched": "@-2h",
+  "where_i_left_off": "Done: editor toolbar. Next: fix the offline sync merge test, then tag renaming.",
+  "left_off_at": "@-1d",
+  "synced_at": "@-3d",
+  "synced_commit": null,
+  "milestones": [
+    { "id": "launch", "title": "Launch v1" },
+    { "id": "later", "title": "After launch" }
+  ],
+  "features": [
+    {
+      "id": "offline-sync", "title": "Offline sync", "description": "Notes edit offline and merge when back online", "kind": "logic", "milestone": "launch",
+      "status": "done", "functional_state": "partial", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": ["src/lib/sync.ts"], "needs_config": [], "depends_on": [],
+      "note": "Conflict merge rewritten yesterday.\nsync.spec.ts: merging a note deleted on another device fails.",
+      "parked_reason": null, "last_conversation": { "session_id": "demo-6", "title": "Rewrite conflict merge", "at": "@-1d" }, "thumbnail": null,
+      "updated_at": "@-2h", "progress_at": "@-2h", "regressed": { "at": "@-2h", "reason": "tests fail" }
+    },
+    {
+      "id": "tags", "title": "Tags", "description": "Tag notes, filter by tag, rename tags", "kind": "ui", "milestone": "launch",
+      "status": "in_progress", "ui_state": "designed", "functional_state": "partial", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/tags.tsx", "src/lib/tags.ts"], "needs_config": [], "depends_on": [],
+      "note": "Done: tag picker.\nStuck: renaming a tag that notes use.\nDecided: tags are case-insensitive.",
+      "parked_reason": null, "last_conversation": { "session_id": "demo-5", "title": "Tag renaming, again", "at": "@-1d" }, "thumbnail": null,
+      "updated_at": "@-1d", "progress_at": "@-6d",
+      "sessions": [{ "id": "demo-1", "at": "@-5d" }, { "id": "demo-2", "at": "@-4d" }, { "id": "demo-3", "at": "@-3d" }, { "id": "demo-4", "at": "@-2d" }, { "id": "demo-5", "at": "@-1d" }]
+    },
+    {
+      "id": "share-links", "title": "Share links", "description": "Read-only links to a note", "kind": "ui", "milestone": "launch",
+      "status": "blocked", "ui_state": "designed", "functional_state": "partial", "verified_by": null,
+      "blocker_reason": "SHARE_SIGNING_KEY missing on the deploy host", "blocked_on": "you",
+      "related_files": ["app/share/[token].tsx", "src/lib/share.ts"], "needs_config": [], "depends_on": [],
+      "note": "Links render.\nUnsigned until the key is set.", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-3d", "progress_at": "@-3d"
+    },
+    {
+      "id": "pro", "title": "Pro plan", "description": "Paywall and the Pro entitlement", "kind": "ui", "milestone": "launch",
+      "status": "blocked", "ui_state": "designed", "functional_state": "partial", "verified_by": null,
+      "blocker_reason": "Pro products not created in App Store Connect", "blocked_on": "you",
+      "related_files": ["app/paywall.tsx", "src/lib/billing.ts"], "needs_config": [], "depends_on": [],
+      "note": "Paywall and restore built.\nCan't test a purchase until the products exist.", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-5d", "progress_at": "@-5d"
+    },
+    {
+      "id": "search", "title": "Search", "description": "Full-text search across notes", "kind": "logic", "milestone": "launch",
+      "status": "blocked", "functional_state": "partial", "verified_by": null,
+      "blocker_reason": "Index rebuild runs out of memory past 10k notes", "blocked_on": "code",
+      "related_files": ["src/lib/search.ts"], "needs_config": [], "depends_on": [],
+      "note": "Works up to 10k notes.\nNext: build the index in chunks.", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-3d", "progress_at": "@-3d"
+    },
+    {
+      "id": "reminders", "title": "Reminders", "description": "Remind me about a note at a time", "kind": "logic", "milestone": "launch",
+      "status": "queued", "functional_state": "none", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": [], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-6d"
+    },
+    {
+      "id": "editor", "title": "Editor", "description": "Rich text editing with undo", "kind": "ui", "milestone": "launch",
+      "status": "done", "ui_state": "polished", "functional_state": "working", "verified_by": "tests", "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/note/[id].tsx", "src/lib/editor.ts"], "needs_config": [], "depends_on": [],
+      "note": "Done: toolbar, undo.\nNext: tables, after launch.", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-1d", "progress_at": "@-1d"
+    },
+    {
+      "id": "notes-list", "title": "Notes list", "description": "All notes, newest first", "kind": "ui", "milestone": "launch",
+      "status": "done", "ui_state": "polished", "functional_state": "working", "verified_by": "tests", "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/(tabs)/index.tsx", "src/lib/notes.ts"], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-12d"
+    },
+    {
+      "id": "sign-in", "title": "Sign in", "description": "Email magic link", "kind": "ui", "milestone": "launch",
+      "status": "done", "ui_state": "polished", "functional_state": "working", "verified_by": "tests", "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/sign-in.tsx", "src/lib/auth.ts"], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-20d"
+    },
+    {
+      "id": "account-deletion", "title": "Account deletion", "description": "Delete the account and every note from settings", "kind": "ui", "milestone": "launch",
+      "status": "done", "ui_state": "designed", "functional_state": "working", "verified_by": "tests", "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/settings/delete-account.tsx", "src/lib/account.ts"], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-4d", "progress_at": "@-4d"
+    },
+    {
+      "id": "settings", "title": "Settings", "description": "Theme and account settings", "kind": "ui", "milestone": "launch",
+      "status": "done", "ui_state": "polished", "functional_state": "working", "verified_by": "tests", "blocker_reason": null, "blocked_on": null,
+      "related_files": ["app/settings/index.tsx", "src/lib/settings.ts"], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-15d"
+    },
+    {
+      "id": "export-pdf", "title": "Export to PDF", "description": "Export a note or a tag as a PDF", "kind": "logic", "milestone": "later",
+      "status": "not_started", "functional_state": "none", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": [], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-10d"
+    },
+    {
+      "id": "web-clipper", "title": "Web clipper", "description": "Save a page to a note from the browser", "kind": "ui", "milestone": "later",
+      "status": "parked", "ui_state": "designed", "functional_state": "partial", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": [], "needs_config": [], "depends_on": [],
+      "note": "Prototype on a branch.\nRevisit after launch.", "parked_reason": "Browser store rules for clippers are unclear",
+      "last_conversation": null, "thumbnail": null, "updated_at": "@-9d"
+    },
+    {
+      "id": "handwriting-to-text", "title": "Handwriting to text", "description": "", "kind": "logic", "milestone": null,
+      "status": "not_started", "functional_state": "none", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": [], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-4d", "idea": true
+    },
+    {
+      "id": "markdown-import", "title": "Markdown import", "description": "", "kind": "logic", "milestone": null,
+      "status": "not_started", "functional_state": "none", "verified_by": null, "blocker_reason": null, "blocked_on": null,
+      "related_files": [], "needs_config": [], "depends_on": [], "note": "", "parked_reason": null, "last_conversation": null, "thumbnail": null, "updated_at": "@-2d", "idea": true
+    }
+  ],
+  "recent_changes": [
+    { "at": "@-2h", "id": "offline-sync", "title": "Offline sync", "field": "functional_state", "from": "working", "to": "partial", "source": "detected" },
+    { "at": "@-1d", "id": "editor", "title": "Editor", "field": "status", "from": "in_progress", "to": "done", "source": "claude" },
+    { "at": "@-2d", "id": "markdown-import", "title": "Markdown import", "field": "added", "from": null, "to": "not_started", "source": "you" },
+    { "at": "@-3d", "id": "search", "title": "Search", "field": "status", "from": "in_progress", "to": "blocked", "source": "claude" },
+    { "at": "@-4d", "id": "account-deletion", "title": "Account deletion", "field": "status", "from": "in_progress", "to": "done", "source": "claude" },
+    { "at": "@-4d", "id": "handwriting-to-text", "title": "Handwriting to text", "field": "added", "from": null, "to": "not_started", "source": "you" },
+    { "at": "@-5d", "id": "pro", "title": "Pro plan", "field": "status", "from": "in_progress", "to": "blocked", "source": "claude" },
+    { "at": "@-6d", "id": "tags", "title": "Tags", "field": "status", "from": "queued", "to": "in_progress", "source": "claude" }
+  ],
+  "decisions": [
+    { "at": "@-1d", "text": "Tags are case-insensitive, because Work and work were two tags", "feature": "tags" },
+    { "at": "@-3d", "text": "Search runs on the device, because notes never leave it unencrypted", "feature": "search" },
+    { "at": "@-5d", "text": "RevenueCat for Pro, because it covers both app stores", "feature": "pro" },
+    { "at": "@-9d", "text": "Notes live in SQLite on the device, because they must work offline", "feature": "offline-sync" }
+  ],
+  "progress_log": [
+    { "day": "@-8d", "overall": 49 }, { "day": "@-6d", "overall": 52 }, { "day": "@-4d", "overall": 56 }, { "day": "@-2d", "overall": 58 }, { "day": "@-1d", "overall": 60 }
+  ],
+  "ignored_files": []
+}

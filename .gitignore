@@ -1,0 +1,22 @@
+# Written by Claude Code for the editor
+.claude-plugin/types/
+
+# Dependencies
+node_modules/
+
+# Throwaway repositories and render scratch
+.sandbox/
+
+# Local Claude Code and noWhat data in this checkout
+/.claude/
+.claude/nowhat/
+
+# Backups
+*.bak
+*.bak-*
+*.orig
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
