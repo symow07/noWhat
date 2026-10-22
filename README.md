@@ -108,17 +108,20 @@ The full detail: [docs/how-it-works.md](docs/how-it-works.md).
 ## Privacy
 
 - **Runs only where you turn it on.** Nothing happens in a project until you run `/nowhat` in it. A `.claude/nowhat.json` someone else committed doesn't switch anything on.
-- **Reads:** the project's files and git history, your test output, the env var **names** your deploy host lists, and your deployed app's URL.
-- **Never stores or sends env values.** Host CLIs print values next to names; noWhat reads past them and keeps only names. Nothing reaches the model but names.
+- **Reads:** the project's files and git history, your test output, and the env var **names** your deploy host lists.
+- **Never stores or sends env values.** Host CLIs print values next to names; noWhat reads past them and keeps only names.
 - **Writes only:** `.claude/nowhat.json` and `.claude/nowhat/` in the project, and `~/.claude/nowhat-projects.json`. Nothing outside the project you run it in.
-- **No telemetry.** The only network requests go to your own deployed app and privacy-policy URL.
+- **No telemetry, no update checks, no noWhat server.** What it reaches over the network is yours, and only with `check_hosts` on (the default): your deploy host's CLI to list env var names (Railway, EAS, Vercel, Fly, Netlify), `eas build:list` and a request to your privacy-policy URL for the launch checklist, a request to your deployed app to see if it answers, and `gh api` for your repository's milestones at setup. Turn `check_hosts` off and noWhat makes no network calls of its own.
+- **Through Claude:** the standing rules, the status line and what noWhat's tools return (file names, commit subjects, env var names) go to the model inside Claude Code's own requests, like the rest of your session.
+
+**Enforced, not asserted.** Until 0.3.0, any project containing the plugin's data file switched it on, including a cloned repository where someone else had committed one. Since 0.3.0 nothing runs until you run `/nowhat` there, and a test checks it. See the [changelog](CHANGELOG.md).
 
 ## Configuration
 
 | Setting | Default | What it does |
 | :- | :- | :- |
-| `run_tests` | on | Lets setup run the project's test commands (10-minute cap, `CI=1`) |
-| `check_hosts` | on | Lets noWhat ask your host's CLI which env var names are set |
+| `run_tests` | on | Lets setup run the project's test commands (10-minute cap, `CI=1`). They do whatever your tests do |
+| `check_hosts` | on | Lets noWhat reach the network: your host's CLI for env var names, the launch checklist's requests, your deployed app, GitHub milestones. Off: no network calls of its own |
 
 Change them with `/plugin configure nowhat`.
 

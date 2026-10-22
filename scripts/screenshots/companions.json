@@ -1,0 +1,35 @@
+[
+  {
+    "path": "/work/pixel-garden",
+    "data": {
+      "schema_version": 2,
+      "project_id": "demo-pixel-garden",
+      "name": "Pixel Garden",
+      "last_touched": "@-5h",
+      "where_i_left_off": "Done: watering animation. Next: save slots.",
+      "features": [
+        { "id": "planting", "title": "Planting", "kind": "logic", "status": "done", "functional_state": "working", "verified_by": "tests", "updated_at": "@-5h" },
+        { "id": "watering", "title": "Watering", "kind": "logic", "status": "done", "functional_state": "working", "verified_by": "tests", "updated_at": "@-5h" },
+        { "id": "seasons", "title": "Seasons", "kind": "logic", "status": "done", "functional_state": "working", "verified_by": "tests", "updated_at": "@-5h" },
+        { "id": "save-slots", "title": "Save slots", "kind": "logic", "status": "in_progress", "functional_state": "partial", "updated_at": "@-5h" },
+        { "id": "shop", "title": "Shop", "kind": "logic", "status": "queued", "functional_state": "none", "updated_at": "@-5h" },
+        { "id": "sound", "title": "Sound", "kind": "logic", "status": "not_started", "functional_state": "none", "updated_at": "@-5h" }
+      ]
+    }
+  },
+  {
+    "path": "/work/ledgerly",
+    "data": {
+      "schema_version": 2,
+      "project_id": "demo-ledgerly",
+      "name": "Ledgerly",
+      "last_touched": "@-19d",
+      "where_i_left_off": "Done: CSV import. Next: invoices.",
+      "features": [
+        { "id": "import", "title": "CSV import", "kind": "logic", "status": "done", "functional_state": "working", "verified_by": "user", "updated_at": "@-19d" },
+        { "id": "invoices", "title": "Invoices", "kind": "logic", "status": "queued", "functional_state": "none", "updated_at": "@-19d" },
+        { "id": "bank-feed", "title": "Bank feed", "kind": "logic", "status": "blocked", "blocker_reason": "Needs an API key from the bank aggregator", "blocked_on": "you", "functional_state": "partial", "updated_at": "@-19d" }
+      ]
+    }
+  }
+]

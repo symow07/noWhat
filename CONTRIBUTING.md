@@ -24,6 +24,8 @@ npx -p typescript tsc -p .
 
 All three must pass. A change to what the sidebar shows needs a test in `tests/pane.test.ts`; a new rule needs one in the test file of the module it lives in.
 
+A change to what the sidebar shows also needs fresh screenshots: `node scripts/screenshots/render.mjs` (see [its README](scripts/screenshots/README.md)).
+
 ## Test data: fixtures only
 
 Tests use fixtures: the in-memory project in `tests/world.ts` and the file lists in `tests/detect.test.ts`. For anything that needs real git, use a throwaway repository under `.sandbox/` (ignored by git), or the demo:

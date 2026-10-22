@@ -211,3 +211,33 @@ test("a features file someone else committed switches nothing on: noWhat stays o
   expect(w.opened).toEqual(['nowhat'])
   expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects.map((entry: { path: string }) => entry.path)).toEqual([ROOT])
 })
+
+test('when noWhat fails, the person carries on: every hook degrades instead of blocking', async ($, on) => {
+  const w = world(on)
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  w.breakDisk()
+
+  // Prompts go through untouched.
+  await $.prompt.submit({ text: 'still works', wait: false, origin: COMPOSER })
+  expect(w.submitted.at(-1)?.text).toBe('still works')
+  // The command answers in one line; the tools refuse and save nothing.
+  expect((await nowhat($)).text).toContain("noWhat couldn't run here")
+  const refused = await $.tool.call({ tool: 'mcp__nowhat__update', tool_use_id: 'u1', changes: [{ id: 'login', status: 'done' }] })
+  expect(refused.deny).toBeDefined()
+  // Edits and turns finish as if noWhat weren't there.
+  expect((await $.tool.call(editFile(`${ROOT}/src/login.tsx`))).deny).toBeUndefined()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+  // The sidebar draws one quiet line instead of an error.
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  expect(await ui.find({ type: 'Text', text: /couldn't draw this view/ })).toBeDefined()
+})
+
+test('a session starts normally even when noWhat cannot read anything', async ($, on) => {
+  const w = world(on)
+  w.breakDisk()
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'hello', wait: false, origin: COMPOSER })
+  expect(w.submitted.at(-1)?.text).toBe('hello')
+  expect(w.opened).toEqual([])
+})

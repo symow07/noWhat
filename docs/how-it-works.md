@@ -192,6 +192,8 @@ hooks/
   project.ts     pure: paths and git output helpers
 prompts/         rules.md, the standing rules Claude reads; setup.md, sort.md, next.md, each button's instructions
 tests/           fixtures only (an in-memory project, Expo + Bun, Flask and Go file lists); never a real project
+docs/demo/       the Acme Notes demo project and its generator
+scripts/screenshots/  regenerates docs/media from the demo
 ```
 
 Test on fixtures, or on a throwaway repository under `.sandbox/` (ignored by git), never on a real project. See [CONTRIBUTING.md](../CONTRIBUTING.md).

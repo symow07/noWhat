@@ -15,6 +15,11 @@ type Stored = { text: string; mtimeMs: number }
 /** A project on disk in memory, no git, and a record of the prompts the mod submits. */
 export function world(on: On) {
   const files = new Map<string, Stored>()
+  /** Set by breakDisk(): every file call fails, as a full or unreadable disk would. */
+  let broken = false
+  const disk = () => {
+    if (broken) throw new Error('disk failure')
+  }
   const submitted: { text: string; context: readonly string[] }[] = []
   /** The panes the surface has open, and the ids closed through $.ui.close. */
   const panes: { id: string; title: string; isShown: boolean; isPlaced: boolean; isFocused?: boolean }[] = []
@@ -36,18 +41,24 @@ export function world(on: On) {
   on('process.run', () => ({
     value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('fs.exists', ($, e) => ({ value: files.has(e.path) || e.path.includes('/prompts/') }))
+  on('fs.exists', ($, e) => {
+    disk()
+    return { value: files.has(e.path) || e.path.includes('/prompts/') }
+  })
   on('fs.read', ($, e) => {
+    disk()
     // Each prompt file reads as its own name, so a test can tell which one a step used.
     if (e.path.includes('/prompts/')) return { value: `prompt:${e.path.split('/').pop()?.replace('.md', '')}` }
     const stored = files.get(e.path)
     return stored ? { value: stored.text } : { deny: `ENOENT ${e.path}` }
   })
   on('fs.write', ($, e) => {
+    disk()
     files.set(e.path, { text: e.text, mtimeMs: tick++ })
     return { value: undefined }
   })
   on('fs.stat', ($, e) => {
+    disk()
     const stored = files.get(e.path)
     return stored
       ? { value: { kind: 'file' as const, size: stored.text.length, mtimeMs: stored.mtimeMs, isLink: false } }
@@ -94,6 +105,9 @@ export function world(on: On) {
     copied,
     toasts,
     opened,
+    breakDisk() {
+      broken = true
+    },
     roadmap,
     /** Codex, or the user, rewriting the file. */
     editOutside(change: (json: { features: { id: string; status: string }[] }) => void) {

@@ -238,6 +238,19 @@ const DETECT_SPEC = {
 }
 
 // ---------------------------------------------------------------------------
+// Failing quietly
+
+/**
+ * Background work (timers, buttons, re-checks) that fails says nothing and
+ * changes nothing: the person carries on, and the sidebar just isn't updated.
+ */
+function quietly(work: Promise<unknown>): void {
+  work.catch(() => undefined)
+}
+
+const COULD_NOT_RUN = "noWhat couldn't run here. Your session isn't affected; /reload-plugins may help."
+
+// ---------------------------------------------------------------------------
 // Disk and git
 
 async function nowIso($: $): Promise<string> {
@@ -789,7 +802,7 @@ async function gatherLaunch(
   }
 
   let privacy = previous?.privacy && previous.privacy.url === privacyUrl ? previous.privacy : privacyUrl ? { url: privacyUrl, status: null, checked_at: null } : null
-  if (privacy && (due || privacy.checked_at === null)) {
+  if (privacy && settings.checkHosts && (due || privacy.checked_at === null)) {
     try {
       const response = await $.http.fetch(privacy.url)
       privacy = { url: privacy.url, status: response.status, checked_at: now }
@@ -800,7 +813,7 @@ async function gatherLaunch(
 
   let deviceBuild = previous?.device_build ?? null
   const easDir = files.find(file => /(^|\/)eas\.json$/.test(file))
-  if (kind === 'app' && easDir !== undefined && (due || previous === null)) {
+  if (kind === 'app' && easDir !== undefined && settings.checkHosts && (due || previous === null)) {
     const dir = easDir.includes('/') ? `${root}/${easDir.slice(0, easDir.lastIndexOf('/'))}` : root
     const ran = await run($, ['eas', 'build:list', '--json', '--non-interactive', '--limit', '20'], dir, 60_000)
     deviceBuild = ran && ran.code === 0 ? deviceBuildOf(ran.out.slice(ran.out.indexOf('['))) : (previous?.device_build ?? null)
@@ -1004,7 +1017,7 @@ function detect($: $, options: DetectOptions): Promise<string> {
       detecting = null
       const again = detectAgain
       detectAgain = null
-      if (again) void detect($, again)
+      if (again) quietly(detect($, again))
     }
   })()
   return detecting
@@ -1072,7 +1085,7 @@ async function setupFacts($: $, place: Place): Promise<string> {
   let milestones: string[] = []
   const remote = isGit ? ((await git($, root, ['remote', 'get-url', 'origin'])) ?? '') : ''
   const slug = /github\.com[:/]([^/]+\/[^/.\s]+)/.exec(remote)?.[1]
-  if (slug) {
+  if (slug && settings.checkHosts) {
     const ran = await run($, ['gh', 'api', `repos/${slug}/milestones?state=all`, '--jq', '.[].title'], root)
     if (ran?.code === 0) milestones = ran.out.trim().split('\n').filter(Boolean).slice(0, 12)
   }
@@ -1509,26 +1522,26 @@ export const register: Register = (on, options) => {
     })
     await restoreSections($)
     if (turnedOn) {
-      void $.ui.open({ id: PANE, title: TITLE })
+      quietly($.ui.open({ id: PANE, title: TITLE }))
       await recordVisit($, place.root)
       // Fresh evidence shortly after start, in the background: the session isn't held up.
       $.clock.after(1500, () => {
-        void detect($, { hosts: 'cached', tests: false })
+        quietly(detect($, { hosts: 'cached', tests: false }))
       })
     }
     // Zero-token upkeep: the file every 3s, the sidebar opening, new commits, and a re-check every 5 minutes while it shows.
     $.clock.every(3000, () => {
-      void pollRoadmap($)
-      void watchPane($)
+      quietly(pollRoadmap($))
+      quietly(watchPane($))
     })
     $.clock.every(HEAD_POLL_MS, () => {
-      void watchHead($)
+      quietly(watchHead($))
     })
     $.clock.every(RECHECK_MS, () => {
-      if (paneShown) void detect($, { hosts: 'cached', tests: false })
+      if (paneShown) quietly(detect($, { hosts: 'cached', tests: false }))
     })
     $.clock.every(15_000, () => {
-      void pollProjects($)
+      quietly(pollProjects($))
     })
     // Keeps "checked 40s ago" honest while the sidebar shows.
     $.clock.every(TICK_MS, () => {
@@ -1536,7 +1549,7 @@ export const register: Register = (on, options) => {
     })
 
     return started
-  })
+  }).catch(($, e, next) => next(e))
 
   // /nowhat: set up a project that has no features file yet; otherwise show or hide the sidebar.
   on('command.run', { command: 'nowhat' }, async ($, e) => {
@@ -1550,9 +1563,9 @@ export const register: Register = (on, options) => {
       await requestSetup($)
       pendingPrompt = word === 'setup' ? `${SETUP_PROMPT} Replace the existing features (replace: true): the user asked to redo the setup.` : SETUP_PROMPT
       $.clock.after(4000, () => {
-        if (pendingPrompt !== null) void fillPrompt($, pendingPrompt).then(() => (pendingPrompt = null))
+        if (pendingPrompt !== null) quietly(fillPrompt($, pendingPrompt).then(() => (pendingPrompt = null)))
       })
-      void $.ui.open({ id: PANE, title: TITLE })
+      quietly($.ui.open({ id: PANE, title: TITLE }))
       return { text: 'noWhat: setting up. Claude groups the code into features.' }
     }
 
@@ -1571,7 +1584,7 @@ export const register: Register = (on, options) => {
     // Nothing here draws panes (a headless run): print the summary instead.
     if (!loaded.roadmap) return { text: `${DATA_FILE} has errors:\n${bullets(loaded.errors, 20)}` }
     return { text: summaryText(loaded.roadmap, await $.clock.now()) }
-  })
+  }).catch(() => ({ text: COULD_NOT_RUN }))
 
   // The standing rules: fixed text, so the prompt cache keeps it.
   on('prompt.compose', async ($, e, next) => {
@@ -1582,7 +1595,7 @@ export const register: Register = (on, options) => {
     return {
       sections: [...composed.sections, { id: 'nowhat:rules', text: await rulesText($), scope: 'session' }],
     }
-  })
+  }).catch(($, e, next) => next(e))
 
   // Where things stand, beside a prompt: sent again only when it changed.
   on('prompt.submit', async ($, e, next) => {
@@ -1604,15 +1617,15 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     // The prompt /nowhat queued: sent now, not awaited, so this turn's end isn't held up by the next.
-    if (pendingPrompt !== null) void sendPending($)
+    if (pendingPrompt !== null) quietly(sendPending($))
     if (editedThisTurn) {
       editedThisTurn = false
       $.clock.after(0, () => {
-        void detect($, { hosts: 'skip', tests: false })
+        quietly(detect($, { hosts: 'skip', tests: false }))
       })
     }
     return result
-  })
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__nowhat__setup' }, async ($, e) => {
     try {
@@ -1677,7 +1690,7 @@ export const register: Register = (on, options) => {
       await serial(() => saveRoadmap($, place.root, identified))
       await registerProject($, place.root, identified.name, identified.project_id, drafted.now)
       await offerTools($, true)
-      void $.ui.open({ id: PANE, title: TITLE })
+      quietly($.ui.open({ id: PANE, title: TITLE }))
 
       const counts = progress(roadmap).counts
       return {
@@ -1690,7 +1703,7 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return { deny: `nowhat: ${messageOf(error)}` }
     }
-  })
+  }).catch(() => ({ deny: 'noWhat hit an error and saved nothing. The session carries on.' }))
 
   on('tool.call', { tool: 'mcp__nowhat__context' }, async ($, e) => {
     try {
@@ -1713,7 +1726,7 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return { deny: `nowhat: ${messageOf(error)}` }
     }
-  })
+  }).catch(() => ({ deny: 'noWhat hit an error and saved nothing. The session carries on.' }))
 
   on('tool.call', { tool: 'mcp__nowhat__detect' }, async ($, e) => {
     try {
@@ -1722,7 +1735,7 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return { deny: `nowhat: ${messageOf(error)}` }
     }
-  })
+  }).catch(() => ({ deny: 'noWhat hit an error and saved nothing. The session carries on.' }))
 
   on('tool.call', { tool: 'mcp__nowhat__update' }, async ($, e) => {
     try {
@@ -1751,7 +1764,7 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return { deny: `nowhat: ${messageOf(error)}` }
     }
-  })
+  }).catch(() => ({ deny: 'noWhat hit an error and saved nothing. The session carries on.' }))
 
   // File each edit under the active feature, or leave it unassigned: never a guess.
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
@@ -1776,7 +1789,7 @@ export const register: Register = (on, options) => {
       const output = ran.text ?? ''
       const ok = ran.isError !== true
       $.clock.after(0, () => {
-        void testsRan($, output, ok)
+        quietly(testsRan($, output, ok))
       })
     }
     return ran
@@ -1825,27 +1838,31 @@ export const register: Register = (on, options) => {
         home: (await $.env.get('HOME')) ?? '',
       },
       {
-        toggleSection: id => void toggleSection($, id),
-        toggleFeature: id => void update($, expandedFeature, current => (current === id ? null : id)),
-        moveQueued: (id, delta) => void moveQueued($, id, delta),
-        continueWith: feature => void continueWith($, feature),
-        togglePin: id => void togglePin($, id),
-        setView: view => void setView($, view),
-        toggleProject: path => void update($, expandedProject, current => (current === path ? null : path)),
-        copyPath: path => void copyPath($, path),
-        refresh: () => void refresh($),
-        setTab: tab => void setTab($, tab),
-        capture: text => void capture($, text),
-        copySummary: text => void copySummary($, text),
-        setup: () => void requestSetup($).then(() => startTurn($, SETUP_PROMPT)),
-        sort: () => void startTurn($, SORT_PROMPT),
+        toggleSection: id => quietly(toggleSection($, id)),
+        toggleFeature: id => quietly(update($, expandedFeature, current => (current === id ? null : id))),
+        moveQueued: (id, delta) => quietly(moveQueued($, id, delta)),
+        continueWith: feature => quietly(continueWith($, feature)),
+        togglePin: id => quietly(togglePin($, id)),
+        setView: view => quietly(setView($, view)),
+        toggleProject: path => quietly(update($, expandedProject, current => (current === path ? null : path))),
+        copyPath: path => quietly(copyPath($, path)),
+        refresh: () => quietly(refresh($)),
+        setTab: tab => quietly(setTab($, tab)),
+        capture: text => quietly(capture($, text)),
+        copySummary: text => quietly(copySummary($, text)),
+        setup: () => quietly(requestSetup($).then(() => startTurn($, SETUP_PROMPT))),
+        sort: () => quietly(startTurn($, SORT_PROMPT)),
       },
     )
+  }).catch(($, e) => {
+    // A drawing that fails leaves one quiet line, never an error in the person's way.
+    const { Text } = $.ui.resolve(e)
+    return <Text dimColor>noWhat couldn't draw this view. Your session isn't affected.</Text>
   })
 
   // /clear, /resume and /branch reset $.state: bring back the sections the person keeps open.
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     await restoreSections($)
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 }

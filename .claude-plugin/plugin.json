@@ -26,8 +26,8 @@
     },
     "check_hosts": {
       "type": "boolean",
-      "title": "Check deploy config",
-      "description": "Ask your deploy host's CLI (Railway, EAS, Vercel, Fly, Netlify) which env var names are set. Names only, never values",
+      "title": "Check hosts (network)",
+      "description": "Let noWhat use the network: your deploy host's CLI (Railway, EAS, Vercel, Fly, Netlify) for env var names, never values; the launch checklist's requests; your deployed app's health; GitHub milestones. Off: no network calls of its own",
       "default": true
     }
   }
