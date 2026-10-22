@@ -53,6 +53,10 @@ export type PaneData = {
   columns: number
   /** The capture field's key: a new one clears it after an idea is added. */
   captureKey: string
+  /** The person ran /nowhat (or pressed Set up) here in this session. */
+  setupRequested: boolean
+  /** Host checks for this project: whether the person answered, and whether they're on. */
+  hostChecks: { answered: boolean; on: boolean }
   /** This project's dashboard, or every project's card. */
   view: 'project' | 'all'
   /** Every registered project, most recently active first. */
@@ -81,6 +85,8 @@ export type PaneActions = {
   setup: () => void
   /** Starts Claude on the unsorted files and the work since the last sort. */
   sort: () => void
+  /** The person's answer to the host question, or the Host checks switch. */
+  setHosts: (on: boolean) => void
 }
 
 type Table = Elements['desktop'] | Elements['terminal'] | Elements['vscode'] | Elements['mobile']
@@ -236,6 +242,7 @@ function thisProject(el: Table, data: PaneData, actions: PaneActions) {
             <Box>
               <Button key="setup" variant="primary" label="Set up with Claude" onPress={() => actions.setup()} />
             </Box>
+            {data.setupRequested && hostsQuestion(el, data, actions)}
           </Box>
         )}
         {allProjectsLink(el, data, actions)}
@@ -249,6 +256,7 @@ function thisProject(el: Table, data: PaneData, actions: PaneActions) {
   return (
     <Box flexDirection="column" gap={1}>
       {header(el, roadmap, data, actions, columns)}
+      {hostsQuestion(el, data, actions)}
       {alertStrip(el, alertsOf(roadmap, data.evidence, data.live, data.nowMs))}
       {nextUpCard(el, roadmap, data, actions)}
       {captureLine(el, data, actions)}
@@ -355,6 +363,28 @@ function nextUpCard(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAc
       ) : null}
       <Box marginTop={1}>
         <Button key="continue" variant="primary" label="Continue with Claude" onPress={() => actions.continueWith(next)} />
+      </Box>
+    </Box>
+  )
+}
+
+/** Asked once per project, during setup; until it's answered nothing reaches the network. */
+export const HOSTS_QUESTION = 'Check your hosts (Railway, Vercel, Fly, Netlify, EAS) for missing keys and app status?'
+
+function hostsQuestion(el: Table, data: PaneData, actions: PaneActions) {
+  const { Box, Button, Text } = el
+  if (data.hostChecks.answered) return null
+  return (
+    <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} key="hosts-question">
+      <Text wrap="wrap">{HOSTS_QUESTION}</Text>
+      <Text dimColor>Reads names only, never values.</Text>
+      <Box flexDirection="row" columnGap={2} marginTop={1}>
+        <Button key="hosts:yes" plain onPress={() => actions.setHosts(true)}>
+          <Text color={ACCENT}>Yes, check</Text>
+        </Button>
+        <Button key="hosts:no" plain onPress={() => actions.setHosts(false)}>
+          <Text dimColor>No</Text>
+        </Button>
       </Box>
     </Box>
   )
@@ -870,6 +900,13 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
         </Button>,
         () => lines(summary.split('\n')),
       )}
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1} key="drawer:hosts">
+        {/* Non-breaking spaces stand in for the other rows' ▸, so the labels line up. */}
+        <Text dimColor>{'\u00a0\u00a0\u00a0'}Host checks</Text>
+        <Button key="hosts:toggle" plain onPress={() => actions.setHosts(!data.hostChecks.on)}>
+          <Text {...(data.hostChecks.on ? { color: ACCENT } : { dimColor: true })}>{data.hostChecks.on ? 'On' : 'Off'}</Text>
+        </Button>
+      </Box>
     </Box>
   )
 }

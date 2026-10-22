@@ -14,4 +14,6 @@ builds it in `folder` (default `~/noWhat-demo/acme-notes`):
 
 What you'll see after `/nowhat` in it: *Offline sync* broke (its test fails), *Tags* is a rabbit hole, *Share links* and *Pro plan* wait on you, *Search* is blocked on code, *Web clipper* is parked with a note, two ideas in the backlog, two unsorted files, four decisions and a launch checklist at 4 of 8.
 
+The sidebar first asks whether to check your hosts: answer *No*, the demo has none.
+
 Delete the folder when you're done. It's added to `~/.claude/nowhat-projects.json` when you run `/nowhat` in it; remove that entry too.

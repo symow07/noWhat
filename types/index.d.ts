@@ -38,6 +38,8 @@ declare module 'claude-code' {
       visitRecorded: boolean
       /** The person ran /nowhat (or pressed Set up) in this session: only then may setup save and register the project. */
       setupRequested: boolean
+      /** The person's answer to "check your hosts?" given before the project was on the list; saved with it once it is. */
+      hostsAnswer: boolean | null
     }
   }
 }

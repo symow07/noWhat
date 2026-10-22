@@ -241,3 +241,59 @@ test('a session starts normally even when noWhat cannot read anything', async ($
   expect(w.submitted.at(-1)?.text).toBe('hello')
   expect(w.opened).toEqual([])
 })
+
+const HOST_CLIS = ['railway', 'eas', 'vercel', 'fly', 'netlify', 'gh']
+const reachedNetwork = (w: { ran: string[][]; fetched: string[] }) => [...w.ran.filter(argv => HOST_CLIS.includes(argv[0] ?? '')).map(argv => argv.join(' ')), ...w.fetched]
+
+test('out of the box noWhat reaches nothing on the network, even with a deploy host in the project', async ($, on) => {
+  const w = world(on)
+  w.listing.push('railway.json')
+  w.files.set(`${ROOT}/railway.json`, { text: '{}', mtimeMs: 1 })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1', tests: true })
+  expect(reachedNetwork(w)).toEqual([])
+  expect(JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').hosts).toEqual([])
+})
+
+test('the host question: answered once during setup, saved with the project, switched in the sidebar', async ($, on) => {
+  const w = world(on)
+  w.listing.push('railway.json')
+  w.files.set(`${ROOT}/railway.json`, { text: '{}', mtimeMs: 1 })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  // Asked during setup, before the project is even on the list.
+  expect(await ui.find({ type: 'Text', text: 'Check your hosts (Railway, Vercel, Fly, Netlify, EAS) for missing keys and app status?' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Reads names only, never values.' })).toBeDefined()
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  // Saved with the project, in the person's own list, never in the project's files.
+  const entry = () => JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects.find((project: { path: string }) => project.path === ROOT)
+  expect(entry()).toMatchObject({ check_hosts: true })
+  expect(w.files.get(FILE)?.text).not.toContain('check_hosts')
+  // Answered: not asked again; the hosts are asked.
+  expect(await ui.find({ key: 'hosts:yes' })).toBeUndefined()
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+  expect(reachedNetwork(w).some(call => call.startsWith('railway'))).toBe(true)
+  // Switched off in the sidebar: off from then on.
+  await ui.press({ key: 'hosts:toggle' })
+  expect(entry()).toMatchObject({ check_hosts: false })
+  const before = reachedNetwork(w).length
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd2' })
+  expect(reachedNetwork(w).length).toBe(before)
+})
+
+test('a project set up without an answer asks at the top of the sidebar until it gets one', async ($, on) => {
+  const w = world(on)
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  expect(await ui.find({ key: 'hosts:no' })).toBeDefined()
+  await ui.press({ key: 'hosts:no' })
+  expect(await ui.find({ key: 'hosts:no' })).toBeUndefined()
+  expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
+  expect(await ui.find({ type: 'Text', text: 'Off' })).toBeDefined()
+})

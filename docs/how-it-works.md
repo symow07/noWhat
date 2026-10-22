@@ -35,7 +35,7 @@ The checks depend on the kind of project detection finds. A backend or library h
 | Own text in permission prompts (5.1.1) | |
 | Privacy manifest, app icon, store screenshots | |
 
-Each check is ✓, ✕ or ? with its evidence in a few words. A check that can't be decided (no git, no EAS) is ?, never ✕. The greps run on every check; the policy URL and the build list are asked on the host-check schedule.
+Each check is ✓, ✕ or ? with its evidence in a few words. A check that can't be decided (no git, no EAS) is ?, never ✕. The greps run on every check; the policy URL and the build list are asked on the host-check schedule, and only with host checks on.
 
 ## All projects
 
@@ -65,8 +65,8 @@ Claude does the one thing code can't do by itself: deciding which files make up 
 | **Unfinished markers**: `TODO`, `FIXME`, `not implemented`, `unimplemented!`… | one `git grep -c` | Any |
 | **Activity**: last change and commits in the last 30 days, uncommitted edits | `git log --name-only`, `git status` | git repositories |
 | **Tests**: the test files named for the feature's files (`me.test.ts`, `test_me.py`, `me_test.go`) or importing them by path, and whether they last passed. A word a test merely contains doesn't count | the project's own test command, run at setup, plus every test run Claude does in the session | JS/TS (bun, npm, pnpm, yarn), pytest, Go, Rust, RSpec, Elixir, Swift, Dart/Flutter, Maven, Gradle, PHPUnit |
-| **Config**: env vars the feature can't work without, and whether the deploy target has them | reads in its files (`process.env.X`, `os.getenv("X")`, `os.Getenv("X")`, `ENV["X"]`, `env::var("X")`, `System.getenv("X")`…) plus `needs_config` for keys a shared config module reads; checked against the host's CLI, **names only** | Railway, EAS, Vercel, Fly, Netlify; a local `.env` as the last resort |
-| **Live**: does the deployed app answer? | an HTTPS request to the public URL (and `/health` when the code has one) | Railway today |
+| **Config**: env vars the feature can't work without, and whether the deploy target has them | reads in its files (`process.env.X`, `os.getenv("X")`, `os.Getenv("X")`, `ENV["X"]`, `env::var("X")`, `System.getenv("X")`…) plus `needs_config` for keys a shared config module reads; checked against the host's CLI, **names only** | Railway, EAS, Vercel, Fly, Netlify, only with host checks on; a local `.env` as the last resort |
+| **Live**: does the deployed app answer? | an HTTPS request to the public URL (and `/health` when the code has one) | Railway today, only with host checks on |
 
 ### The rules
 
@@ -106,7 +106,7 @@ You never edit the features file. Changes reach it four ways, cheapest first:
    - a turn in which Claude edited files ends with that evidence re-read, and Claude's own test runs are parsed for results
    - the file is polled every 3 seconds, so any edit to it shows within seconds
 
-   None of these run the test suites (setup and Claude's own test runs do). Host CLIs and the network are asked only when something they depend on changed (HEAD, `.env*`, `eas.json`, `app.json`, a host config file) or 15 minutes have passed.
+   None of these run the test suites (setup and Claude's own test runs do). Host checks are off until you say yes for the project (setup asks once; *Host checks* in the sidebar switches it). With them on, host CLIs and the network are asked only when something they depend on changed (HEAD, `.env*`, `eas.json`, `app.json`, a host config file) or 15 minutes have passed.
 2. **Claude's notes:** a short set of standing rules (about 450 tokens, fixed text, so the prompt cache keeps it) asks Claude to mark a feature *in progress* before editing for it, *done* when finished, *blocked* with who it's waiting on, *parked* with why, to keep each feature's catch-up note, to record key *decisions*, and to write *where you left off*. Each is one small `mcp__nowhat__update` call. Edits are filed under the feature last put in progress, never guessed, and each session that works on a feature is counted for the rabbit-hole warning.
 3. **A status line:** each prompt carries one line on where things stand (about 70 tokens), sent only when it changed.
 4. **Unsorted and *Sort with Claude*:** for work done outside Claude Code (Codex, your editor, another machine). New source files no feature claims show as *Unsorted*, found by commit range since the last sort (dates can lie after a rebase) plus untracked files. *Sort with Claude* files them and catches up on the commits.

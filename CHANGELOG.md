@@ -7,7 +7,8 @@ The first public release. Before it, the plugin was called `roadmap` and was nev
 ### Security
 
 - **noWhat now runs only in projects where you ran `/nowhat`.** Until 0.3.0, any project containing the plugin's data file (`.claude/roadmap.json`, later `.claude/nowhat.json`) switched it on: detection, git and host-CLI calls, the sidebar, and Claude's standing rules. That included a cloned repository where someone else had committed the file. Now nothing runs in a project until you run `/nowhat` there, which adds it to `~/.claude/nowhat-projects.json`; a committed data file switches nothing on. `tests/mod.test.ts` checks this.
-- **`check_hosts` now covers every network call.** The privacy-policy request, `eas build:list` and `gh api` (repository milestones, at setup) used to run with it off.
+- **No network calls out of the box.** Host checks (your deploy host's CLI, the launch checklist's requests, your deployed app, GitHub milestones) are now off by default. Setup asks once per project, and the answer is saved in `~/.claude/nowhat-projects.json`, never in the project's files, and switched with *Host checks* in the sidebar. Before 0.3.0 they were on by default. `tests/mod.test.ts` checks that a project with a deploy host gets no CLI calls or requests until you say yes.
+- **`check_hosts` covers every network call.** The privacy-policy request, `eas build:list` and `gh api` used to run even with it off.
 - **Every hook fails quietly.** An error inside noWhat can no longer block a prompt, a command, a tool call or a session start: the person carries on and the sidebar isn't updated. `tests/mod.test.ts` breaks the disk under noWhat and checks each one.
 
 ### Added

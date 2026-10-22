@@ -92,4 +92,5 @@ writeFileSync(join(target, '.claude/nowhat/evidence.json'), `${JSON.stringify(ev
 console.log(`Acme Notes is ready at ${target}
 
 Open that folder in Claude Code and run /nowhat: it turns noWhat on there and opens the sidebar.
+The sidebar asks once whether to check your hosts: answer No, the demo has none.
 It's a demo: delete the folder when you're done.`)

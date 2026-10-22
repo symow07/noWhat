@@ -112,9 +112,10 @@ const paneTab = atom({ plugin: 'nowhat', key: 'tab' } as const, 'features')
 const checking = atom({ plugin: 'nowhat', key: 'checking' } as const, false)
 const captureGeneration = atom({ plugin: 'nowhat', key: 'captureGeneration' } as const, 0)
 const setupRequested = atom({ plugin: 'nowhat', key: 'setupRequested' } as const, false)
+const hostsAnswer = atom({ plugin: 'nowhat', key: 'hostsAnswer' } as const, null)
 
 /** The user's choices in the plugin's settings (userConfig). */
-const settings = { runTests: true, checkHosts: true }
+const settings = { runTests: true, hostsByDefault: false }
 
 /** Set when Claude edits files in a turn, so the turn's end re-reads the evidence. */
 let editedThisTurn = false
@@ -381,7 +382,11 @@ async function readRoadmap($: $, root: string): Promise<Loaded> {
   }
 }
 
-type Registry = { version: 1; projects: { path: string; name: string; added_at: string; project_id?: string }[] }
+type Registry = {
+  version: 1
+  /** check_hosts: the person's answer for that project (their consent, so it lives here, never in the project's files). */
+  projects: { path: string; name: string; added_at: string; project_id?: string; check_hosts?: boolean }[]
+}
 
 const registryPath = async ($: $) => `${(await $.env.get('HOME')) ?? ''}/.claude/nowhat-projects.json`
 
@@ -425,22 +430,59 @@ const OFF = "noWhat is off in this project: the user can run /nowhat here to tur
  * features file is gone. Writes only when something changed.
  */
 async function registerProject($: $, root: string, name: string, projectId: string | null, now: string): Promise<void> {
-  const path = await registryPath($)
   const projects = await readRegistry($)
   const gone = async (entry: Registry['projects'][number]) => !(await $.fs.exists(`${entry.path}/${DATA_FILE}`))
   const kept: Registry['projects'] = []
   let addedAt: string | null = null
+  let hosts: boolean | undefined
   for (const entry of projects) {
     const same = entry.path === root
     const moved = !same && projectId !== null && entry.project_id === projectId && (await gone(entry))
-    if (same || moved) addedAt ??= entry.added_at
-    else kept.push(entry)
+    if (same || moved) {
+      addedAt ??= entry.added_at
+      hosts ??= entry.check_hosts
+    } else kept.push(entry)
   }
-  const mine = { path: root, name, added_at: addedAt ?? now, ...(projectId ? { project_id: projectId } : {}) }
-  const registry: Registry = { version: 1, projects: [...kept, mine] }
-  const before = JSON.stringify(projects.map(entry => ({ ...entry })).sort((a, b) => a.path.localeCompare(b.path)))
-  const after = JSON.stringify([...registry.projects].sort((a, b) => a.path.localeCompare(b.path)))
-  if (before !== after) await $.fs.write(path, `${JSON.stringify(registry, null, 2)}\n`)
+  // An answer given during setup, before the project was on the list, is saved with it.
+  const answered = await read($, hostsAnswer)
+  if (answered !== null) hosts = answered
+  const mine = { path: root, name, added_at: addedAt ?? now, ...(projectId ? { project_id: projectId } : {}), ...(hosts !== undefined ? { check_hosts: hosts } : {}) }
+  await writeRegistry($, projects, [...kept, mine])
+}
+
+async function writeRegistry($: $, before: Registry['projects'], after: Registry['projects']): Promise<void> {
+  const sorted = (list: Registry['projects']) => JSON.stringify([...list].sort((a, b) => a.path.localeCompare(b.path)))
+  if (sorted(before) === sorted(after)) return
+  await $.fs.write(await registryPath($), `${JSON.stringify({ version: 1, projects: after } satisfies Registry, null, 2)}\n`)
+}
+
+/**
+ * Whether noWhat may reach the network for this project (host CLIs, the
+ * launch checklist's requests, the deployed app, GitHub milestones): the
+ * person's answer for it, else the plugin setting, which is off by default.
+ */
+async function hostsOn($: $, root: string): Promise<boolean> {
+  const entry = (await readRegistry($)).find(project => project.path === root)
+  return entry?.check_hosts ?? (await read($, hostsAnswer)) ?? settings.hostsByDefault
+}
+
+/** Whether the person answered the host question for this project yet. */
+async function hostsAnswered($: $, root: string): Promise<boolean> {
+  const entry = (await readRegistry($)).find(project => project.path === root)
+  return entry?.check_hosts !== undefined || (await read($, hostsAnswer)) !== null
+}
+
+/** The person's answer, from the sidebar's question or its Host checks switch. */
+async function setHosts($: $, allow: boolean): Promise<void> {
+  const place = await placeOf($)
+  await update($, hostsAnswer, () => allow)
+  const projects = await readRegistry($)
+  if (projects.some(project => project.path === place.root)) {
+    await writeRegistry($, projects, projects.map(project => (project.path === place.root ? { ...project, check_hosts: allow } : project)))
+    // On: ask the hosts now. Off: drop what they said before.
+    quietly(detect($, { hosts: allow ? 'refresh' : 'skip', tests: false }))
+  }
+  await update($, revision, n => n + 1)
 }
 
 /** This session as `last_conversation` names it: its id, and its first prompt as a title. */
@@ -774,6 +816,7 @@ async function gatherLaunch(
   due: boolean,
   liveUrl: string | null,
   now: string,
+  allowed: boolean,
 ): Promise<LaunchEvidence | null> {
   const kind = launchKind(inventory.frameworks, files)
   if (kind === null) return null
@@ -802,7 +845,7 @@ async function gatherLaunch(
   }
 
   let privacy = previous?.privacy && previous.privacy.url === privacyUrl ? previous.privacy : privacyUrl ? { url: privacyUrl, status: null, checked_at: null } : null
-  if (privacy && settings.checkHosts && (due || privacy.checked_at === null)) {
+  if (privacy && allowed && (due || privacy.checked_at === null)) {
     try {
       const response = await $.http.fetch(privacy.url)
       privacy = { url: privacy.url, status: response.status, checked_at: now }
@@ -813,7 +856,7 @@ async function gatherLaunch(
 
   let deviceBuild = previous?.device_build ?? null
   const easDir = files.find(file => /(^|\/)eas\.json$/.test(file))
-  if (kind === 'app' && easDir !== undefined && settings.checkHosts && (due || previous === null)) {
+  if (kind === 'app' && easDir !== undefined && allowed && (due || previous === null)) {
     const dir = easDir.includes('/') ? `${root}/${easDir.slice(0, easDir.lastIndexOf('/'))}` : root
     const ran = await run($, ['eas', 'build:list', '--json', '--non-interactive', '--limit', '20'], dir, 60_000)
     deviceBuild = ran && ran.code === 0 ? deviceBuildOf(ran.out.slice(ran.out.indexOf('['))) : (previous?.device_build ?? null)
@@ -904,7 +947,8 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
   let live = previous?.live ?? null
   const hostsKey = await hostsKeyOf($, root, files, isGit)
   const isStale = hostsCheckedAt === null || nowMs - Date.parse(hostsCheckedAt) > HOST_TTL_MS || hostsKey !== (previous?.hosts_key ?? null)
-  const hostsDue = settings.checkHosts && (options.hosts === 'refresh' || (options.hosts === 'cached' && isStale))
+  const allowed = await hostsOn($, root)
+  const hostsDue = allowed && (options.hosts === 'refresh' || (options.hosts === 'cached' && isStale))
   if (hostsDue) {
     const checked = await checkHosts($, root, files, inventory, manifests)
     hosts = checked.checks
@@ -920,8 +964,11 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
       }
     }
   }
-  if (!settings.checkHosts) hosts = []
-  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now)
+  if (!allowed) {
+    hosts = []
+    live = null
+  }
+  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now, allowed)
   const unsorted = isGit ? await gatherUnsorted($, root, roadmap, fileSet) : []
 
   let testRuns = previous?.test_runs ?? []
@@ -1033,7 +1080,7 @@ function describeDetection(evidence: EvidenceFile, changes: readonly Change[]): 
   )
   return [
     `Checked ${Object.keys(evidence.features).length} features.`,
-    hosts.length > 0 ? `Config: ${hosts.join('; ')}.` : 'Config: no deploy host found to check.',
+    hosts.length > 0 ? `Config: ${hosts.join('; ')}.` : 'Config: not checked (host checks are off for this project, or no deploy host was found).',
     runs.length > 0 ? `Tests: ${runs.join('; ')}.` : '',
     evidence.live ? `Live: ${evidence.live.url} answered ${evidence.live.status || 'nothing'}.` : '',
     evidence.launch
@@ -1085,7 +1132,7 @@ async function setupFacts($: $, place: Place): Promise<string> {
   let milestones: string[] = []
   const remote = isGit ? ((await git($, root, ['remote', 'get-url', 'origin'])) ?? '') : ''
   const slug = /github\.com[:/]([^/]+\/[^/.\s]+)/.exec(remote)?.[1]
-  if (slug && settings.checkHosts) {
+  if (slug && (await hostsOn($, root))) {
     const ran = await run($, ['gh', 'api', `repos/${slug}/milestones?state=all`, '--jq', '.[].title'], root)
     if (ran?.code === 0) milestones = ran.out.trim().split('\n').filter(Boolean).slice(0, 12)
   }
@@ -1508,7 +1555,7 @@ async function recordVisit($: $, root: string): Promise<void> {
 
 export const register: Register = (on, options) => {
   settings.runTests = options.run_tests !== false
-  settings.checkHosts = options.check_hosts !== false
+  settings.hostsByDefault = options.check_hosts === true
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -1831,6 +1878,8 @@ export const register: Register = (on, options) => {
         visitCommits: await read($, visitCommits),
         columns: e.props.bodyColumns,
         captureKey: `capture:${await read($, captureGeneration)}`,
+        setupRequested: await read($, setupRequested),
+        hostChecks: { answered: await hostsAnswered($, place.root), on: await hostsOn($, place.root) },
         view,
         projects,
         unsorted: evidence?.unsorted ?? [],
@@ -1852,6 +1901,7 @@ export const register: Register = (on, options) => {
         copySummary: text => quietly(copySummary($, text)),
         setup: () => quietly(requestSetup($).then(() => startTurn($, SETUP_PROMPT))),
         sort: () => quietly(startTurn($, SORT_PROMPT)),
+        setHosts: allow => quietly(setHosts($, allow)),
       },
     )
   }).catch(($, e) => {

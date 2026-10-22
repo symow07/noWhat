@@ -7,6 +7,8 @@
 
 **For when you open a project and think… now what?**
 
+Out of the box, noWhat makes no network calls of its own. No telemetry, no update checks.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg)](https://code.claude.com/docs/en/plugins/mods/overview)
 [![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](.claude-plugin/plugin.json)
@@ -96,8 +98,8 @@ Claude does one thing code can't: deciding which files make up which feature. Ev
 - **Code:** do the feature's files exist, and does anything import them?
 - **Git:** what changed, when, and which new files no feature claims yet (*Unsorted*)
 - **Tests:** which test files belong to the feature, and whether they last passed
-- **Config:** env var names the feature needs, checked against Railway, EAS, Vercel, Fly or Netlify. Names only
-- **Live:** does your deployed app answer?
+- **Config:** env var names the feature needs, checked against Railway, EAS, Vercel, Fly or Netlify. Names only, and only if you said yes to host checks
+- **Live:** does your deployed app answer? Also only with host checks on
 
 Fixed rules turn that into states. *Working* needs proof (tests, Claude ran it, or you said so), and unknown never downgrades anything.
 
@@ -111,7 +113,7 @@ The full detail: [docs/how-it-works.md](docs/how-it-works.md).
 - **Reads:** the project's files and git history, your test output, and the env var **names** your deploy host lists.
 - **Never stores or sends env values.** Host CLIs print values next to names; noWhat reads past them and keeps only names.
 - **Writes only:** `.claude/nowhat.json` and `.claude/nowhat/` in the project, and `~/.claude/nowhat-projects.json`. Nothing outside the project you run it in.
-- **No telemetry, no update checks, no noWhat server.** What it reaches over the network is yours, and only with `check_hosts` on (the default): your deploy host's CLI to list env var names (Railway, EAS, Vercel, Fly, Netlify), `eas build:list` and a request to your privacy-policy URL for the launch checklist, a request to your deployed app to see if it answers, and `gh api` for your repository's milestones at setup. Turn `check_hosts` off and noWhat makes no network calls of its own.
+- **No network calls unless you say yes, per project.** No telemetry, no update checks, no noWhat server. During setup noWhat asks once: "Check your hosts (Railway, Vercel, Fly, Netlify, EAS) for missing keys and app status? Reads names only, never values." Only after a yes does it reach anything, and only your own services: your deploy host's CLI to list env var names, `eas build:list` and a request to your privacy-policy URL for the launch checklist, a request to your deployed app to see if it answers, and `gh api` for your repository's milestones. The answer is saved for that project in `~/.claude/nowhat-projects.json` (yours, never the project's files) and switched with *Host checks* in the sidebar.
 - **Through Claude:** the standing rules, the status line and what noWhat's tools return (file names, commit subjects, env var names) go to the model inside Claude Code's own requests, like the rest of your session.
 
 **Enforced, not asserted.** Until 0.3.0, any project containing the plugin's data file switched it on, including a cloned repository where someone else had committed one. Since 0.3.0 nothing runs until you run `/nowhat` there, and a test checks it. See the [changelog](CHANGELOG.md).
@@ -121,7 +123,7 @@ The full detail: [docs/how-it-works.md](docs/how-it-works.md).
 | Setting | Default | What it does |
 | :- | :- | :- |
 | `run_tests` | on | Lets setup run the project's test commands (10-minute cap, `CI=1`). They do whatever your tests do |
-| `check_hosts` | on | Lets noWhat reach the network: your host's CLI for env var names, the launch checklist's requests, your deployed app, GitHub milestones. Off: no network calls of its own |
+| `check_hosts` | off | The answer for projects where you haven't answered noWhat's host question. Each project's own answer wins; switch it with *Host checks* in the sidebar |
 
 Change them with `/plugin configure nowhat`.
 

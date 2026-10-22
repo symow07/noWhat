@@ -28,6 +28,11 @@ export function world(on: On) {
   const copied: string[] = []
   /** The panes the mod opened. */
   const opened: string[] = []
+  /** Every process the mod started (argv), and every URL it fetched. */
+  const ran: string[][] = []
+  const fetched: string[] = []
+  /** The project's top-level files, as listing it shows them. */
+  const listing = ['PLAN.md']
   const toasts: string[] = []
   let tick = 1
 
@@ -38,9 +43,14 @@ export function world(on: On) {
   on('session.root', () => ({ value: ROOT }))
   on('session.id', () => ({ value: 'session-1' }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'Wire up the login screen', toolUses: [] }] }))
-  on('process.run', () => ({
-    value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('http.fetch', ($, e) => {
+    fetched.push(String((e as { url?: unknown }).url ?? e))
+    return { value: { status: 200 } as never }
+  })
   on('fs.exists', ($, e) => {
     disk()
     return { value: files.has(e.path) || e.path.includes('/prompts/') }
@@ -66,7 +76,7 @@ export function world(on: On) {
   })
   on('fs.list', ($, e) =>
     e.path === ROOT
-      ? { value: [{ name: 'PLAN.md', kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false }] }
+      ? { value: listing.map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })) }
       : { deny: `ENOENT ${e.path}` },
   )
   on('tool.register', ($, e) => ({ value: { tool: e.name } }))
@@ -105,6 +115,9 @@ export function world(on: On) {
     copied,
     toasts,
     opened,
+    ran,
+    fetched,
+    listing,
     breakDisk() {
       broken = true
     },

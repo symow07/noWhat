@@ -21,14 +21,14 @@
     "run_tests": {
       "type": "boolean",
       "title": "Run test suites",
-      "description": "Let Nowhat run the project's own test commands during setup to prove which features work",
+      "description": "Let noWhat run the project's own test commands during setup to prove which features work",
       "default": true
     },
     "check_hosts": {
       "type": "boolean",
-      "title": "Check hosts (network)",
-      "description": "Let noWhat use the network: your deploy host's CLI (Railway, EAS, Vercel, Fly, Netlify) for env var names, never values; the launch checklist's requests; your deployed app's health; GitHub milestones. Off: no network calls of its own",
-      "default": true
+      "title": "Check hosts by default (network)",
+      "description": "For projects where you haven't answered noWhat's question: let it reach the network (your deploy host's CLI for env var names, never values; the launch checklist's requests; your deployed app; GitHub milestones). Off by default. Each project's own answer wins, and you can switch it in the sidebar",
+      "default": false
     }
   }
 }

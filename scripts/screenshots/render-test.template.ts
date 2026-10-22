@@ -14,8 +14,9 @@ test('screenshots', async ($, on) => {
   w.files.set(`${ROOT}/.claude/nowhat/evidence.json`, { text: JSON.stringify(DATA.evidence), mtimeMs: 1 })
   for (const project of DATA.companions) w.files.set(`${project.path}/.claude/nowhat.json`, { text: JSON.stringify(project.data), mtimeMs: 1 })
   const projects = [
-    { path: ROOT, name: 'Acme Notes', added_at: '2026-01-01T00:00:00.000Z', project_id: 'demo-acme-notes' },
-    ...DATA.companions.map(project => ({ path: project.path, name: project.data.name, added_at: '2026-01-01T00:00:00.000Z', project_id: project.data.project_id })),
+    // Answered "no" to host checks: the demo has no host, and the question isn't what the screenshots show.
+    { path: ROOT, name: 'Acme Notes', added_at: '2026-01-01T00:00:00.000Z', project_id: 'demo-acme-notes', check_hosts: false },
+    ...DATA.companions.map(project => ({ path: project.path, name: project.data.name, added_at: '2026-01-01T00:00:00.000Z', project_id: project.data.project_id, check_hosts: false })),
   ]
   w.files.set(REGISTRY, { text: JSON.stringify({ version: 1, projects }), mtimeMs: 1 })
 
