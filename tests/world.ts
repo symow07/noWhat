@@ -12,9 +12,13 @@ export const PRESENTATION = { isFullscreen: false, columns: 100 }
 
 type Stored = { text: string; mtimeMs: number }
 
-/** A project on disk in memory, no git, and a record of the prompts the mod submits. */
-export function world(on: On) {
+/** A repository for the world: its files, and what its git and test runner answer (null: as if not installed). */
+export type Repo = { files: Record<string, string>; run: (argv: readonly string[]) => { exitCode: number; stdout: string } | null }
+
+/** A project on disk in memory, no git unless a repo is given, and a record of the prompts the mod submits. */
+export function world(on: On, repo: Repo | null = null) {
   const files = new Map<string, Stored>()
+  for (const [path, text] of Object.entries(repo?.files ?? {})) files.set(`${ROOT}/${path}`, { text, mtimeMs: 0 })
   /** Set by breakDisk(): every file call fails, as a full or unreadable disk would. */
   let broken = false
   const disk = () => {
@@ -45,6 +49,8 @@ export function world(on: On) {
   on('session.messages', () => ({ value: [{ role: 'user', text: 'Wire up the login screen', toolUses: [] }] }))
   on('process.run', ($, e) => {
     ran.push([...e.argv])
+    const answer = repo?.run(e.argv)
+    if (answer) return { value: { ...answer, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', ($, e) => {

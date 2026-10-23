@@ -171,6 +171,25 @@ test('rows open on click; the queue reorders and pins from the details; done unf
   expect(await ui.find({ type: 'Text', text: 'Unpin status' })).toBeDefined()
 })
 
+test('only actions are buttons: on a desktop a name is text, and Details opens its row', async ($, on) => {
+  await sample($, on)
+  const desktop = await mountPane($, 'desktop')
+  // A desktop draws every Button as a native button: no feature name may be one.
+  const labels = (await desktop.findAll({ type: 'Button' })).map(button => button.text)
+  for (const title of ['Login screen', 'Password reset email', 'Tags']) expect(labels.some(label => label.includes(title))).toBe(false)
+  expect(await desktop.find({ type: 'Text', text: 'Tags' })).toBeDefined()
+  expect((await desktop.find({ key: 'feature:login' }))?.text).toBe('Details')
+  await desktop.press({ key: 'feature:login' })
+  expect((await desktop.find({ key: 'feature:login' }))?.text).toBe('Hide')
+  // Sections say what their button does; the label beside it is text.
+  expect((await desktop.find({ key: 'section:drawer:progress' }))?.text).toBe('Show')
+  expect(await desktop.find({ type: 'Text', text: 'Milestones' })).toBeUndefined()
+  // The terminal draws a plain Button as its text, so there the name itself opens the row.
+  const terminal = await mountPane($, 'terminal')
+  expect((await terminal.find({ key: 'feature:reset' }))?.text).toContain('Password reset email')
+  expect((await terminal.find({ key: 'section:drawer:progress' }))?.text).toContain('▸ Progress')
+})
+
 test('milestones group the rows and open with their own bars', async ($, on) => {
   await sample($, on, {
     milestones: [

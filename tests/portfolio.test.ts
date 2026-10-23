@@ -60,8 +60,11 @@ describe('a project card', () => {
       untouchedDays: 0,
       live: true,
     })
+    // The count and the percentage agree: built of planned.
     expect(card.milestones).toEqual([{ title: 'Launch v1', overall: 0, done: 0, total: 2 }])
-    expect(card.health?.kind).toBe('thriving')
+    expect({ overall: card.overall, built: card.built, planned: card.planned }).toEqual({ overall: 25, built: 1, planned: 4 })
+    // A key waits on the person: never thriving.
+    expect(card.health?.kind).toBe('needs_you')
   })
 
   test('a quiet project knows how long it has been', () => {

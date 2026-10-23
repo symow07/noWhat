@@ -10,7 +10,7 @@ Set up noWhat for this project: group its code into features. The plugin detects
    - depends_on: ids of features it can't move on until they're done
    - note, only when you know something the code doesn't show: at most 4 terse lines of facts ("Done: parser. Next: webhook.")
    - milestone, only when the repository states phases (GitHub milestones, release tags, a planning doc's phases); otherwise no milestones at all
-   - status only for work with no code yet: not_started, or queued for what's planned next, in order. Leave status out for everything that has code: the plugin derives it
+   - status where you know it: done for work the commits or docs show finished (merged, shipped), in_progress for work underway, not_started or queued (in order) for planned work. Leave it out when unsure: the plugin derives it. A status you give is kept unless the evidence disproves it
    Don't set ui_state, functional_state or verified_by: the evidence sets them.
 4. Save it with one mcp__nowhat__setup call (with milestones if you used any). Its result says what the evidence showed.
 5. Call mcp__nowhat__detect with tests: true, so the project's test suites prove which features work.

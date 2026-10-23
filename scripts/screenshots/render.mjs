@@ -102,6 +102,8 @@ function html(node, theme) {
   const inner = (node.children ?? []).map(child => html(child, theme)).join('')
   switch (node.type) {
     case 'Box': {
+      // Shown only under the pointer (a row's Details button): a still picture has no pointer.
+      if (props.display === 'none') return ''
       const style = ['display:flex', `flex-direction:${props.flexDirection ?? 'row'}`, 'min-width:0']
       if (props.gap !== undefined) style.push(`row-gap:${props.gap * U * 1.25}px`)
       if (props.columnGap !== undefined) style.push(`column-gap:${props.columnGap * U * 0.75}px`)

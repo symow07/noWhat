@@ -8,8 +8,14 @@ export const STATUSES = ['queued', 'not_started', 'in_progress', 'blocked', 'par
 export const UI_STATES = ['none', 'designed', 'polished'] as const
 export const FUNCTIONAL_STATES = ['none', 'partial', 'working'] as const
 export const KINDS = ['ui', 'logic'] as const
-/** How "working" was confirmed: Claude ran it, its tests pass, or the user said so. */
-export const VERIFICATIONS = ['ran', 'tests', 'user'] as const
+/**
+ * How "working" was confirmed: Claude ran it, its tests pass, or the user said
+ * so; detection adds coverage (the suite passes and runs its code) and suite
+ * (the suite passes, none of its tests map to it: built, tests not mapped).
+ */
+export const VERIFICATIONS = ['ran', 'tests', 'user', 'coverage', 'suite'] as const
+/** The ones Claude may claim: coverage and suite are detection's alone. */
+export const CLAUDE_VERIFICATIONS = ['ran', 'tests', 'user'] as const
 /** Who a blocked feature waits on: the user (keys, accounts, a decision) or more code. */
 export const BLOCKERS = ['you', 'code'] as const
 
@@ -94,11 +100,13 @@ export type Feature = {
   functional_state: FunctionalState
   /** How `working` was confirmed; null unless functional_state is working. */
   verified_by: Verification | null
+  /** Who set the status: Claude (recorded, detection keeps it) or detection; null in older files. */
+  status_by: 'claude' | 'detected' | null
   blocker_reason: string | null
   /** Who a blocked feature waits on; null unless blocked. */
   blocked_on: BlockedOn | null
-  /** Set when detection blocked it (missing config): detection lifts it again, back to `from`. */
-  auto_blocked: { from: Status } | null
+  /** Set when detection blocked it (missing config): detection lifts it again, back to `from`. `source` is where the names were missing. */
+  auto_blocked: { from: Status; source?: string } | null
   milestone: string | null
   /** Catch-up note Claude keeps: terse facts, at most TEXT_LIMITS.note_lines lines. */
   note: string
@@ -154,8 +162,8 @@ export type Roadmap = {
   recent_changes: Change[]
   /** Newest first. */
   decisions: Decision[]
-  /** One overall percentage per day, oldest first. */
-  progress_log: { day: string; overall: number | null }[]
+  /** One overall percentage per day, oldest first. `measure: built` since 0.4; entries without it used the old UI-and-works average and aren't compared with it. */
+  progress_log: { day: string; overall: number | null; measure?: 'built' }[]
   /** Files (or folders) a sort left out of every feature on purpose: never listed as unsorted. */
   ignored_files: string[]
 }
@@ -191,7 +199,7 @@ function conversationOf(value: unknown): Conversation | null {
 
 /** What "working" needs from Claude, said the same way by validation and the update tool. */
 export const WORKING_NEEDS =
-  'working needs verified_by: ran (you ran it), tests (its tests pass) or user (the user said so). Unconfirmed, keep functional_state partial: a done feature then shows as unverified'
+  'working needs verified_by: ran (you ran it), tests (its tests pass) or user (the user said so). Unconfirmed, keep functional_state partial: a done feature then shows as unconfirmed'
 
 const LOGIC_HAS_NO_UI = 'kind "logic" has no UI: leave ui_state out'
 
@@ -223,6 +231,7 @@ function checkFeature(raw: unknown, now: string, at: string, errors: string[], o
       ? null
       : oneOf(raw.verified_by, VERIFICATIONS, `${where}: verified_by`, errors)
   if (options.strict && functional === 'working' && verified === null) errors.push(`${where}: ${WORKING_NEEDS}`)
+  if (options.strict && verified !== null && !(CLAUDE_VERIFICATIONS as readonly string[]).includes(verified)) errors.push(`${where}: ${WORKING_NEEDS}`)
   const blocker = text(raw.blocker_reason)
   if (status === 'blocked' && !blocker) errors.push(`${where}: a blocked feature needs a blocker_reason`)
   const blockedOn =
@@ -234,6 +243,7 @@ function checkFeature(raw: unknown, now: string, at: string, errors: string[], o
   const isConfigList = Array.isArray(config) && config.every(name => typeof name === 'string' && /^[A-Z][A-Z0-9_]*$/.test(name))
   if (!isConfigList) errors.push(`${where}: needs_config must be a list of env var names (UPPER_SNAKE)`)
   const autoFrom = isObject(raw.auto_blocked) && typeof raw.auto_blocked.from === 'string' ? raw.auto_blocked.from : null
+  const autoSource = isObject(raw.auto_blocked) ? text(raw.auto_blocked.source) : null
   const parked = text(raw.parked_reason)
   if (status === 'parked' && !parked) errors.push(`${where}: a parked feature needs a parked_reason`)
   const depends = raw.depends_on ?? []
@@ -253,10 +263,13 @@ function checkFeature(raw: unknown, now: string, at: string, errors: string[], o
     ui_state: ui,
     functional_state: functional,
     verified_by: functional === 'working' ? verified : null,
+    status_by: raw.status_by === 'claude' || raw.status_by === 'detected' ? raw.status_by : null,
     blocker_reason: isBlocked ? blocker : null,
     blocked_on: isBlocked ? (blockedOn ?? inferBlockedOn(blocker)) : null,
     auto_blocked:
-      isBlocked && autoFrom !== null && (STATUSES as readonly string[]).includes(autoFrom) ? { from: autoFrom as Status } : null,
+      isBlocked && autoFrom !== null && (STATUSES as readonly string[]).includes(autoFrom)
+        ? { from: autoFrom as Status, ...(autoSource ? { source: autoSource } : {}) }
+        : null,
     milestone: text(raw.milestone),
     related_files: [...new Set(files as string[])],
     needs_config: [...new Set(config as string[])],
@@ -296,7 +309,7 @@ function progressLogOf(value: unknown): Roadmap['progress_log'] {
   return value
     .flatMap(item =>
       isObject(item) && typeof item.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.day)
-        ? [{ day: item.day, overall: typeof item.overall === 'number' ? item.overall : null }]
+        ? [{ day: item.day, overall: typeof item.overall === 'number' ? item.overall : null, ...(item.measure === 'built' ? { measure: 'built' as const } : {}) }]
         : [],
     )
     .slice(-PROGRESS_DAYS)
@@ -403,6 +416,7 @@ export function serialize(roadmap: Roadmap): string {
     milestone: feature.milestone,
     ...(feature.pinned ? { pinned: true } : {}),
     status: feature.status,
+    ...(feature.status_by ? { status_by: feature.status_by } : {}),
     ...(feature.kind === 'ui' ? { ui_state: feature.ui_state } : {}),
     functional_state: feature.functional_state,
     verified_by: feature.verified_by,
@@ -446,15 +460,20 @@ export function serialize(roadmap: Roadmap): string {
 }
 
 export type Progress = {
+  /** 0-100 of planned features that are built; null when there are none. The headline figure. */
+  built: number | null
+  /** Built features, and planned ones (ideas aside): `built` is the one over the other. */
+  builtCount: number
+  planned: number
   /** 0-100 over `ui` features; null when there are none. */
   ui: number | null
   /** 0-100 over every feature; null when there are none. */
   functional: number | null
-  /** The average of the two (functional alone when there is no UI). */
+  /** The headline: the share built, so a count and its percentage always agree. */
   overall: number | null
   counts: Record<Status, number>
-  /** Marked done, but nobody confirmed it works. */
-  unverified: string[]
+  /** Recorded done, and nothing proved it works or disproved it. */
+  unconfirmed: string[]
   /** Looks done, doesn't work yet (features still being built). */
   designedNotWorking: string[]
   /** Works, doesn't look finished yet. */
@@ -464,23 +483,28 @@ export type Progress = {
 const percent = (sum: number, count: number): number | null =>
   count === 0 ? null : Math.round((sum / count) * 100)
 
+/** Built: proven working, or recorded done with nothing disproving it. */
+export const isBuilt = (feature: Feature) => feature.functional_state === 'working' || (feature.status === 'done' && feature.regressed === null)
+
 /** Progress over any set of features: the whole roadmap, or one milestone. */
 export function progressOf(features: readonly Feature[]): Progress {
   const counts: Record<Status, number> = { queued: 0, not_started: 0, in_progress: 0, blocked: 0, parked: 0, done: 0 }
   let uiSum = 0
   let uiCount = 0
   let functionalSum = 0
-  const unverified: string[] = []
+  let builtCount = 0
+  const unconfirmed: string[] = []
   const designedNotWorking: string[] = []
   const workingNotPolished: string[] = []
 
   const planned = features.filter(feature => !feature.idea)
   for (const feature of planned) {
     counts[feature.status] += 1
+    if (isBuilt(feature)) builtCount += 1
     const isZero = ZERO_STATUSES.includes(feature.status)
     const isDone = feature.status === 'done'
     functionalSum += isZero ? 0 : WEIGHTS.functional[feature.functional_state]
-    if (isDone && feature.functional_state !== 'working') unverified.push(feature.id)
+    if (isDone && feature.functional_state !== 'working') unconfirmed.push(feature.id)
     if (feature.kind !== 'ui') continue
     const ui = feature.ui_state ?? 'none'
     uiCount += 1
@@ -490,11 +514,19 @@ export function progressOf(features: readonly Feature[]): Progress {
     if (feature.functional_state === 'working' && ui !== 'polished') workingNotPolished.push(feature.id)
   }
 
-  const ui = percent(uiSum, uiCount)
-  const functional = percent(functionalSum, planned.length)
-  const overall = functional === null ? null : ui === null ? functional : Math.round((ui + functional) / 2)
-
-  return { ui, functional, overall, counts, unverified, designedNotWorking, workingNotPolished }
+  const built = percent(builtCount, planned.length)
+  return {
+    built,
+    builtCount,
+    planned: planned.length,
+    ui: percent(uiSum, uiCount),
+    functional: percent(functionalSum, planned.length),
+    overall: built,
+    counts,
+    unconfirmed,
+    designedNotWorking,
+    workingNotPolished,
+  }
 }
 
 export const progress = (roadmap: Roadmap): Progress => progressOf(roadmap.features)
@@ -608,6 +640,7 @@ export function blankFeature(id: string, title: string, now: string): Feature {
     ui_state: 'none',
     functional_state: 'none',
     verified_by: null,
+    status_by: null,
     blocker_reason: null,
     blocked_on: null,
     auto_blocked: null,
@@ -670,8 +703,8 @@ export function recordProgress(roadmap: Roadmap, now: string): Roadmap {
   const day = now.slice(0, 10)
   const overall = progress(roadmap).overall
   const last = roadmap.progress_log[roadmap.progress_log.length - 1]
-  if (last?.day === day && last.overall === overall) return roadmap
-  const log = [...roadmap.progress_log.filter(entry => entry.day !== day), { day, overall }].slice(-PROGRESS_DAYS)
+  if (last?.day === day && last.overall === overall && last.measure === 'built') return roadmap
+  const log = [...roadmap.progress_log.filter(entry => entry.day !== day), { day, overall, measure: 'built' as const }].slice(-PROGRESS_DAYS)
   return { ...roadmap, progress_log: log }
 }
 
@@ -720,8 +753,9 @@ export function applyUpdate(current: Roadmap, input: UpdateInput, context: Updat
     if (change.milestone !== undefined) feature.milestone = change.milestone === null ? null : text(change.milestone)
     if (change.status !== undefined) {
       feature.status = oneOf(change.status, STATUSES, `${where}: status`, errors) ?? feature.status
-      // Claude's own call on the status replaces whatever detection had decided.
+      // Claude's own call on the status replaces whatever detection had decided, and detection keeps it.
       feature.auto_blocked = null
+      feature.status_by = 'claude'
     }
     // A logic feature has no UI state at all; one that becomes ui starts at none.
     if (feature.kind === 'logic') {
@@ -742,7 +776,7 @@ export function applyUpdate(current: Roadmap, input: UpdateInput, context: Updat
         feature.functional_state
     }
     if (change.verified_by !== undefined) {
-      feature.verified_by = oneOf(change.verified_by, VERIFICATIONS, `${where}: verified_by`, errors) ?? feature.verified_by
+      feature.verified_by = oneOf(change.verified_by, CLAUDE_VERIFICATIONS, `${where}: verified_by`, errors) ?? feature.verified_by
     }
     if (feature.functional_state !== 'working') feature.verified_by = null
     else if (was.functional !== 'working' && change.verified_by === undefined) errors.push(`${where}: ${WORKING_NEEDS}`)
@@ -969,7 +1003,7 @@ export function contextLine(roadmap: Roadmap, active: string | null): string {
   const next = nextUp(roadmap)
   const broke = roadmap.features.filter(feature => feature.regressed !== null).slice(0, 5)
   const parts = [
-    `noWhat (.claude/nowhat.json): ${pct(p.overall)} overall, UI ${pct(p.ui)}, functional ${pct(p.functional)}.`,
+    `noWhat (.claude/nowhat.json): ${p.builtCount} of ${p.planned} features built (${pct(p.built)}).`,
     ...(broke.length > 0 ? [`Broke (was working): ${broke.map(feature => `${feature.id} (${feature.regressed?.reason})`).join(', ')}.`] : []),
     `Active feature (your file edits are filed under it): ${active ?? 'none'}.`,
     `In progress: ${list('in_progress', 8).map(feature => feature.id).join(', ') || 'none'}.`,
@@ -988,8 +1022,8 @@ const stateLabel = (feature: Feature) =>
 export function summaryText(roadmap: Roadmap, nowMs: number): string {
   const p = progress(roadmap)
   const flag = (feature: Feature) =>
-    p.unverified.includes(feature.id)
-      ? '  ⚑ unverified'
+    p.unconfirmed.includes(feature.id)
+      ? '  ⚑ unconfirmed'
       : p.designedNotWorking.includes(feature.id)
         ? '  ⚑ designed, not working'
         : p.workingNotPolished.includes(feature.id)
@@ -1002,7 +1036,7 @@ export function summaryText(roadmap: Roadmap, nowMs: number): string {
   const next = nextUp(roadmap)
 
   const lines = [
-    `${roadmap.name}: ${pct(p.overall)} (UI ${pct(p.ui)} · functional ${pct(p.functional)}) · last touched ${ago(roadmap.last_touched, nowMs)}`,
+    `${roadmap.name}: built ${pct(p.built)} (${p.builtCount} of ${p.planned}) · last touched ${ago(roadmap.last_touched, nowMs)}`,
     next ? `Next up: ${next.title}` : '',
     `Where you left off: ${roadmap.where_i_left_off || '(not written yet)'}`,
     ...section('Needs you', blocked.filter(feature => feature.blocked_on === 'you'), feature => `${feature.title} · ${feature.blocker_reason}`),

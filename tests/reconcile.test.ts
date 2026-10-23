@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { FeatureEvidence, FileEvidence } from '../hooks/detect'
-import { initialStatus, isHealthy, reconcile, signalsOf } from '../hooks/reconcile'
+import { initialStatus, isHealthy, provenBy, reconcile, signalsOf } from '../hooks/reconcile'
 import { type Feature, type Roadmap, blankFeature } from '../hooks/schema'
 
 const NOW = '2026-10-12T12:00:00.000Z'
@@ -54,7 +54,7 @@ describe('initial status', () => {
     expect(initialStatus(ev({ files: [file({ path: 'src/a.ts', exists: false, wired: null, screen: false, markers: 0 })] }), NOW_MS)).toBe('not_started')
     expect(initialStatus(ev(), NOW_MS)).toBe('done')
     expect(initialStatus(ev({ tests_status: 'none', last_change: '2026-10-10T00:00:00.000Z' }), NOW_MS)).toBe('in_progress')
-    // Shipped a while ago and never proved: done, and the sidebar says unverified.
+    // Shipped a while ago and never proved: done, and the sidebar says unconfirmed.
     expect(initialStatus(ev({ tests_status: 'none' }), NOW_MS)).toBe('done')
   })
 
@@ -151,5 +151,64 @@ describe('regressions', () => {
     expect(unwired.regressed?.reason).toBe('a file is no longer wired in')
     const healed = reconcile(roadmapOf([failing]), { a: ev() }, NOW).roadmap.features[0] as Feature
     expect(healed).toMatchObject({ functional_state: 'working', regressed: null })
+  })
+})
+
+describe('unknown is not zero', () => {
+  const unmapped = (fields: Partial<FeatureEvidence> = {}) =>
+    ev({ tests: [], tests_status: 'none', suite: 'pass', last_change: '2026-10-11T00:00:00.000Z', files: [file({ wired: null, code: true })], ...fields })
+
+  test('what proves it: its own tests, coverage of its code, or the whole suite; never an unreadable signal against it', () => {
+    expect(provenBy(ev())).toBe('tests')
+    // Wiring nobody could check doesn't count against it.
+    expect(provenBy(ev({ files: [file({ wired: null, code: true })] }))).toBe('tests')
+    expect(provenBy(unmapped())).toBe('suite')
+    expect(provenBy(unmapped({ coverage: 0.6 }))).toBe('coverage')
+    // What does count: a file seen unreferenced, a failing test, a missing key, a suite that fails or never ran.
+    expect(provenBy(unmapped({ files: [file({ wired: false })] }))).toBeNull()
+    expect(provenBy(unmapped({ suite: 'fail' }))).toBeNull()
+    expect(provenBy(unmapped({ suite: null }))).toBeNull()
+    expect(provenBy(unmapped({ env_missing: ['KEY'] }))).toBeNull()
+    expect(initialStatus(unmapped(), NOW_MS)).toBe('done')
+  })
+
+  test('built with no mapped tests, while the suite passes: done, not in progress', () => {
+    const { roadmap, changes } = reconcile(roadmapOf([feature({ status: 'in_progress', functional_state: 'partial' })]), { a: unmapped() }, NOW)
+    expect(roadmap.features[0]).toMatchObject({ status: 'done', functional_state: 'working', verified_by: 'suite', status_by: 'detected' })
+    expect(changes.map(change => `${change.field}:${change.to}`)).toEqual(['functional_state:working', 'status:done'])
+  })
+
+  test("Claude's own call stands: in progress stays in progress, and edits in flight keep it there", () => {
+    const recorded = feature({ status: 'in_progress', status_by: 'claude' })
+    expect(reconcile(roadmapOf([recorded]), { a: unmapped() }, NOW).roadmap.features[0]?.status).toBe('in_progress')
+    const editing = reconcile(roadmapOf([feature({ status: 'in_progress' })]), { a: unmapped({ uncommitted: true }) }, NOW).roadmap
+    expect(editing.features[0]?.status).toBe('in_progress')
+    // Older files: a status Claude logged counts as recorded.
+    const logged = { ...roadmapOf([feature({ status: 'in_progress' })]), recent_changes: [{ at: NOW, id: 'a', title: 'A', field: 'status' as const, from: 'queued', to: 'in_progress', source: 'claude' as const }] }
+    expect(reconcile(logged, { a: unmapped() }, NOW).roadmap.features[0]?.status).toBe('in_progress')
+  })
+
+  test('recorded done that nothing disproves stays done; a failing test is what disproves it', () => {
+    const done = feature({ status: 'done', functional_state: 'partial', status_by: 'claude' })
+    expect(reconcile(roadmapOf([done]), { a: ev({ tests: [], tests_status: 'none', suite: null }) }, NOW).changes).toEqual([])
+    const working = feature({ status: 'done', functional_state: 'working', verified_by: 'suite' })
+    expect(reconcile(roadmapOf([working]), { a: unmapped({ files: [file({ wired: false })] }) }, NOW).roadmap.features[0]?.regressed?.reason).toBe('a file is no longer wired in')
+    expect(reconcile(roadmapOf([working]), { a: unmapped({ files: [file({ wired: null, code: true })] }) }, NOW).changes).toEqual([])
+  })
+
+  test("a block read off the local .env lifts once the deploy host is what's asked, even unreadable", () => {
+    const blocked = feature({
+      status: 'blocked',
+      blocked_on: 'you',
+      blocker_reason: 'Missing in local .env: LLM_API_KEY',
+      auto_blocked: { from: 'in_progress' },
+      functional_state: 'partial',
+    })
+    // The host couldn't be read: no source, the key still required.
+    const unknown = ev({ env_required: ['LLM_API_KEY'], env_missing: [], env_source: null, tests_status: 'none' })
+    expect(reconcile(roadmapOf([blocked]), { a: unknown }, NOW).roadmap.features[0]).toMatchObject({ status: 'in_progress', auto_blocked: null })
+    // A block the deploy host made stays while the host can't be read: unknown never moves a state.
+    const hosted = { ...blocked, blocker_reason: 'Missing in Railway (production): LLM_API_KEY', auto_blocked: { from: 'in_progress' as const, source: 'Railway (production)' } }
+    expect(reconcile(roadmapOf([hosted]), { a: unknown }, NOW).changes).toEqual([])
   })
 })

@@ -2,7 +2,7 @@
 // Pure: register.tsx reads the registry and each project's files and hands them here.
 
 import type { FeatureEvidence } from './detect'
-import { type Health, STALLED_DAYS, healthOf, lastActive } from './insights'
+import { type Health, STALLED_DAYS, healthOf, lastActive, liveOf } from './insights'
 import { type Roadmap, type Status, nextUp, progressOf } from './schema'
 
 /** A project untouched this many days gets a nudge on its card. */
@@ -17,11 +17,16 @@ export type ProjectSummary = {
   isHere: boolean
   /** ok; missing: the folder or its roadmap is gone; broken: the roadmap has errors. */
   state: 'ok' | 'missing' | 'broken'
+  /** The share built: the card's headline. */
   overall: number | null
+  /** The share whose latest code is deployed; null when no deploy can be seen. */
+  livePct: number | null
   ui: number | null
   functional: number | null
   features: number
   done: number
+  built: number
+  planned: number
   health: Health | null
   /** Newest activity: the roadmap's last touch or a commit to a feature's files. */
   lastActiveMs: number
@@ -53,10 +58,13 @@ export function summarize(input: Input, nowMs: number): ProjectSummary {
     isHere: input.isHere,
     state: input.exists ? 'broken' : 'missing',
     overall: null,
+    livePct: null,
     ui: null,
     functional: null,
     features: 0,
     done: 0,
+    built: 0,
+    planned: 0,
     health: null,
     lastActiveMs: 0,
     untouchedDays: 0,
@@ -83,10 +91,13 @@ export function summarize(input: Input, nowMs: number): ProjectSummary {
     name: roadmap.name || input.name,
     state: 'ok',
     overall: p.overall,
+    livePct: liveOf(roadmap, input.evidence).live,
     ui: p.ui,
     functional: p.functional,
     features: roadmap.features.length,
     done: p.counts.done,
+    built: p.builtCount,
+    planned: p.planned,
     health: healthOf(roadmap, input.evidence, nowMs),
     lastActiveMs: active,
     untouchedDays: Math.max(0, Math.floor((nowMs - active) / DAY)),
@@ -97,7 +108,8 @@ export function summarize(input: Input, nowMs: number): ProjectSummary {
     milestones: roadmap.milestones.map(milestone => {
       const features = roadmap.features.filter(feature => feature.milestone === milestone.id)
       const mp = progressOf(features)
-      return { title: milestone.title, overall: mp.overall, done: mp.counts.done, total: features.length }
+      // The count and the percentage are one measure: built of planned.
+      return { title: milestone.title, overall: mp.overall, done: mp.builtCount, total: mp.planned }
     }),
     live: input.live,
   }

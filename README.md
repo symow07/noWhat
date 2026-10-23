@@ -82,7 +82,7 @@ One line per key choice and why, recorded by Claude as it works. The answer to "
 
 ### All projects
 
-One card per project: health, progress, what waits on you, what's next. A project untouched for two weeks says so.
+One card per project: health, how much is built and live, what waits on you, what's next. A project untouched for two weeks says so.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/all-projects-dark.png">
@@ -99,9 +99,9 @@ Claude does one thing code can't: deciding which files make up which feature. Ev
 - **Git:** what changed, when, and which new files no feature claims yet (*Unsorted*)
 - **Tests:** which test files belong to the feature, and whether they last passed
 - **Config:** env var names the feature needs, checked against Railway, EAS, Vercel, Fly or Netlify. Names only, and only if you said yes to host checks
-- **Live:** does your deployed app answer? Also only with host checks on
+- **Live:** does your deployed app answer, and which commit is deployed (`railway status`, or a deploy branch or tag in the repository)? The host calls also only with host checks on
 
-Fixed rules turn that into states. *Working* needs proof (tests, Claude ran it, or you said so), and unknown never downgrades anything.
+Fixed rules turn that into states. *Working* needs proof (its tests, the whole suite passing, Claude ran it, or you said so). Unknown never downgrades anything: a check that can't run shows *unknown*, never 0%, and a status Claude recorded stays unless the evidence disproves it. The headline is how much is built, and, when a deploy can be seen, how much of that is live.
 
 These checks cost **zero tokens**. They run when the sidebar opens, every 5 minutes while it shows, and within 30 seconds of a commit, including commits from Codex or another editor. Only three buttons spend tokens: *Set up with Claude*, *Continue with Claude* and *Sort with Claude*.
 
@@ -113,7 +113,7 @@ The full detail: [docs/how-it-works.md](docs/how-it-works.md).
 - **Reads:** the project's files and git history, your test output, and the env var **names** your deploy host lists.
 - **Never stores or sends env values.** Host CLIs print values next to names; noWhat reads past them and keeps only names.
 - **Writes only:** `.claude/nowhat.json` and `.claude/nowhat/` in the project, and `~/.claude/nowhat-projects.json`. Nothing outside the project you run it in.
-- **No network calls unless you say yes, per project.** No telemetry, no update checks, no noWhat server. During setup noWhat asks once: "Check your hosts (Railway, Vercel, Fly, Netlify, EAS) for missing keys and app status? Reads names only, never values." Only after a yes does it reach anything, and only your own services: your deploy host's CLI to list env var names, `eas build:list` and a request to your privacy-policy URL for the launch checklist, a request to your deployed app to see if it answers, and `gh api` for your repository's milestones. The answer is saved for that project in `~/.claude/nowhat-projects.json` (yours, never the project's files) and switched with *Host checks* in the sidebar.
+- **No network calls unless you say yes, per project.** No telemetry, no update checks, no noWhat server. During setup noWhat asks once: "Check your hosts (Railway, Vercel, Fly, Netlify, EAS) for missing keys and app status? Reads names only, never values." Only after a yes does it reach anything, and only your own services, read-only: your deploy host's CLI to list env var names, `railway status` to read which commit Railway has deployed (deployment metadata, never a variable), `eas build:list` and a request to your privacy-policy URL for the launch checklist, a request to your deployed app to see if it answers, and `gh api` for your repository's milestones. The answer is saved for that project in `~/.claude/nowhat-projects.json` (yours, never the project's files) and switched with *Host checks* in the sidebar.
 - **Through Claude:** the standing rules, the status line and what noWhat's tools return (file names, commit subjects, env var names) go to the model inside Claude Code's own requests, like the rest of your session.
 
 **Enforced, not asserted.** Until 0.3.0, any project containing the plugin's data file switched it on, including a cloned repository where someone else had committed one. Since 0.3.0 nothing runs until you run `/nowhat` there, and a test checks it. See the [changelog](CHANGELOG.md).
@@ -149,7 +149,7 @@ The checks use none. The standing rules (about 450 tokens) are fixed text, so th
 Yes. Detection reads git, not Claude's memory. New files show as *Unsorted*; *Sort with Claude* files them and catches up on the commits.
 
 **Which stacks?**
-Any. Tests are read for JS/TS (bun, npm, pnpm, yarn), pytest, Go, Rust, RSpec, Elixir, Swift, Dart/Flutter, Maven, Gradle and PHPUnit. Screens are recognised for Next.js, Expo Router, SvelteKit, Nuxt, Astro and Remix.
+Any. Tests are read for JS/TS (bun, npm, pnpm, yarn), pytest, Go, Rust, RSpec, Elixir, Swift, Dart/Flutter, Maven, Gradle and PHPUnit. Screens are recognised for Next.js, Expo Router, SvelteKit, Nuxt, Astro and Remix, native apps, and servers that render their own pages (route handlers or templates that return HTML). Integration tests count for the code behind the routes they call.
 
 **Is there a keyboard shortcut?**
 A plugin can't bind one, so `/nowhat` toggles the sidebar. In the terminal, `Ctrl+X Tab` focuses it and `Ctrl+X X` closes it.

@@ -98,6 +98,9 @@ describe('health', () => {
   test('thriving, needs you, stalled', () => {
     const moving = roadmapOf([feature('a', { status: 'in_progress', updated_at: NOW })])
     expect(healthOf(moving, {}, NOW_MS).kind).toBe('thriving')
+    // Never thriving past something that waits on the person, however busy the rest is.
+    const busy = roadmapOf([feature('a', { status: 'in_progress', updated_at: NOW }), feature('b', { status: 'blocked', blocker_reason: 'Stripe key', blocked_on: 'you' })])
+    expect(healthOf(busy, {}, NOW_MS)).toMatchObject({ kind: 'needs_you', detail: '1 waiting on you' })
 
     const waiting = roadmapOf([feature('a', { status: 'blocked', blocker_reason: 'Stripe key', blocked_on: 'you' })])
     expect(healthOf(waiting, {}, NOW_MS)).toMatchObject({ kind: 'needs_you', detail: '1 waiting on you' })
@@ -134,7 +137,22 @@ describe('alerts, rabbit holes, scope and the weekly summary', () => {
     const roadmap = roadmapOf([], {
       recent_changes: [change(1, 'a', 'added', 'not_started'), change(2, 'b', 'added', 'queued'), change(3, 'c', 'status', 'done'), change(9, 'd', 'added', 'queued')],
     })
-    expect(scopeWeek(roadmap, NOW_MS)).toEqual({ added: ['A', 'B'], done: ['C'] })
+    expect(scopeWeek(roadmap, NOW_MS)).toEqual({ added: ['A', 'B'], done: ['C'], merges: [] })
+  })
+
+  test('merged work is done work: a built feature a merged pull request changed', () => {
+    const roadmap = roadmapOf([
+      feature('books', { status: 'done', functional_state: 'working', verified_by: 'suite' }),
+      feature('draft', { status: 'in_progress' }),
+    ])
+    const merged = [
+      { at: at(1), pr: 382, features: ['books', 'draft'] },
+      { at: at(2), pr: 375, features: ['books'] },
+      { at: at(9), pr: 300, features: ['books'] },
+    ]
+    // Draft isn't built, so its merge doesn't finish it; the old merge is last week's.
+    expect(scopeWeek(roadmap, NOW_MS, merged)).toEqual({ added: [], done: ['BOOKS'], merges: [375, 382] })
+    expect(weeklySummary(roadmap, {}, NOW_MS, merged).split('\n')[1]).toBe('Built 50%. Done: BOOKS; 2 PRs merged (#375–#382).')
   })
 
   test('the weekly summary: five short lines at most', () => {
@@ -147,10 +165,10 @@ describe('alerts, rabbit holes, scope and the weekly summary', () => {
       {
         name: 'Shop',
         recent_changes: [{ at: at(1), id: 'done-one', title: 'Checkout', field: 'status', from: 'in_progress', to: 'done', source: 'claude' }],
-        progress_log: [{ day: at(8).slice(0, 10), overall: 10 }],
+        progress_log: [{ day: at(8).slice(0, 10), overall: 10, measure: 'built' }],
       },
     )
     const summary = weeklySummary(roadmap, {}, NOW_MS).split('\n')
-    expect(summary).toEqual(['Shop · week of 12 Oct', '17% (+7). Done: Checkout.', 'Waiting on you: 1 (KEYS).', 'Next: PAY.'])
+    expect(summary).toEqual(['Shop · week of 12 Oct', 'Built 33% (+23). Done: Checkout.', 'Waiting on you: 1 (KEYS).', 'Next: PAY.'])
   })
 })
