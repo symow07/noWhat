@@ -6,6 +6,7 @@ Calibration: what noWhat can't read no longer counts against a project.
 
 ### Fixed
 
+- **Tool configs and platform files read as "no longer wired in".** `eslint.config.js` is found by its tool and never imported, and `useThing.web.ts` is imported as `useThing`, so both looked unreferenced, and a proven feature flipped between working and broke.
 - **Wiring that timed out read as "nothing references this".** One `git grep -w` over a large repository could run for minutes against a 30-second cap, and the empty answer marked every file unwired, so nothing could reach *working*. Wiring now comes from one read of the files' text (about a second for a few thousand files), and a file noWhat couldn't read leaves wiring *unknown*, never *unwired*. Every other `git grep` that fails or times out is now *unknown* too.
 - **Server-rendered pages weren't screens.** Only component files counted, so a server whose route handlers return HTML showed UI 0%. The UI style is now decided first, and server pages are recognised by what they contain. With no screen recognisable at all, UI shows *unknown*, not 0%.
 - **Integration tests mapped to nothing.** Tests that call URLs now count for the modules behind the routes they call; a module nearly every handler calls is left out. The sidebar says how many test files map to no feature.

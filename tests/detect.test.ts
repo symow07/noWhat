@@ -519,6 +519,23 @@ describe('unknown is not zero', () => {
     expect(featureEvidence(['src/web/orders.ts'], { ...base, referencesComplete: false }).files[0]?.wired).toBeNull()
   })
 
+  test("a platform variant is imported by its plain name; a sibling's own name doesn't wire it", () => {
+    const files = new Set(['src/lib/use-thing.ts', 'src/lib/use-thing.web.ts', 'src/web/app.ts'])
+    expect(referenceNames('src/lib/use-thing.web.ts')).toEqual(['use-thing'])
+    const wired = (paths: string[]) =>
+      featureEvidence(['src/lib/use-thing.web.ts'], { ...base, files, references: new Map([['use-thing', new Set(paths)]]) }).files[0]?.wired
+    expect(wired(['src/lib/use-thing.ts', 'src/lib/use-thing.web.ts', 'src/web/app.ts'])).toBe(true)
+    expect(wired(['src/lib/use-thing.ts', 'src/lib/use-thing.web.ts'])).toBe(false)
+  })
+
+  test("a tool's config is found by name, not imported; the project's own .config module isn't excused", () => {
+    const wired = (path: string) => featureEvidence([path], { ...base, files: new Set([path]) }).files[0]?.wired
+    expect(wired('mobile/eslint.config.js')).toBe(true)
+    expect(wired('babel.config.cjs')).toBe(true)
+    expect(wired('.eslintrc.js')).toBe(true)
+    expect(wired('src/lib/auth.config.ts')).toBe(false)
+  })
+
   test('a server page is a screen; live and coverage say so only when they can', () => {
     const ev = featureEvidence(['src/web/orders.ts'], { ...base, pages: new Set(['src/web/orders.ts']) })
     expect(ev.files[0]).toMatchObject({ screen: true, code: true })

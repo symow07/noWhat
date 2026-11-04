@@ -304,12 +304,27 @@ const VAGUE_NAMES = new Set(['index', 'main', 'mod', 'init', '__init__', 'page',
 
 const stem = (path: string) => (path.split('/').pop() ?? '').replace(/\.(d\.)?[^.]+$/, '')
 
+/** Metro and Expo pick `name.web.ts` over `name.ts` by platform: both are imported as `name`. */
+const PLATFORM_VARIANT = /\.(web|ios|android|native)(?=\.[cm]?[jt]sx?$)/
+
+/** What a file is imported as: a file and its platform variants are one module. */
+const moduleOf = (path: string) => path.replace(PLATFORM_VARIANT, '').replace(/\.[cm]?[jt]sx?$/, '')
+
+/**
+ * A tool's own config (eslint.config.js, babel.config.js, .eslintrc.cjs): the tool
+ * finds it by name and nothing imports it, so never "unwired". Under src/, lib/ or
+ * app/, a `.config.ts` is the project's own module, wired like any other.
+ */
+export function isToolConfig(path: string): boolean {
+  return /(^|\/)(\.\w+rc|[\w-]+\.config)\.[cm]?[jt]s$/.test(path) && !/(^|\/)(src|lib|app)\//.test(path)
+}
+
 /**
  * The words a reference to this file would contain: its import name, made
  * specific (`sync/engine`, `./engine`) when the name alone is common.
  */
 export function referenceNames(path: string): string[] {
-  let name = stem(path)
+  let name = stem(path.replace(PLATFORM_VARIANT, ''))
   const parts = path.split('/')
   const parent = parts.length > 1 ? (parts[parts.length - 2] ?? '') : ''
   if (/^(index|__init__|mod|main)$/.test(name) && parent) name = parent
@@ -1374,8 +1389,8 @@ export function featureEvidence(relatedFiles: readonly string[], facts: ProjectF
       // Nothing read, no name a reference could be found by, or a read that missed files: unknown, never "not wired".
       const found =
         references !== null &&
-        names.some(name => [...(references.get(name) ?? [])].some(other => other !== path && !isTestFile(other) && !isDocFile(other)))
-      wired = isRoutedByConvention(path, facts.frameworks)
+        names.some(name => [...(references.get(name) ?? [])].some(other => moduleOf(other) !== moduleOf(path) && !isTestFile(other) && !isDocFile(other)))
+      wired = isRoutedByConvention(path, facts.frameworks) || isToolConfig(path)
         ? true
         : references === null || names.length === 0
           ? null
