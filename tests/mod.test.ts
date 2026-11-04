@@ -321,6 +321,35 @@ test('with host checks off, only Check once reaches a host: detect and a refresh
   expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
 })
 
+test('with host checks off, the privacy page and the EAS build list wait for Check once', async ($, on) => {
+  const privacy = 'https://acme.example/privacy'
+  const listing = ['railway.json', 'eas.json', 'ios/App/Info.plist', 'src/login.tsx']
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: `${listing.join('\n')}\n` }
+    if (argv[0] === 'git' && argv[1] === 'grep' && argv.includes('-o')) return { exitCode: 0, stdout: `${privacy}\n` }
+    if (argv[0] === 'eas') return { exitCode: 0, stdout: '[]' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: Object.fromEntries(listing.map(path => [path, '{}'])), run: answers })
+  const builds = () => w.ran.filter(argv => argv.slice(0, 2).join(' ') === 'eas build:list')
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  await ui.press({ key: 'hosts:no' })
+
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+  await ui.press({ key: 'refresh' })
+  expect(w.fetched).toEqual([])
+  expect(builds()).toEqual([])
+
+  // Both are in reach here: the person's click asks both, so the two lines above can fail.
+  await ui.press({ key: 'hosts:once' })
+  expect(w.fetched).toContain(privacy)
+  expect(builds().length).toBeGreaterThan(0)
+})
+
 test('a tool cannot ask for Check once, and the switch on then off still drops what the hosts said', async ($, on) => {
   const answers = (argv: readonly string[]) => {
     const command = argv.join(' ')
