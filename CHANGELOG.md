@@ -8,10 +8,6 @@ Calibration: what noWhat can't read no longer counts against a project.
 
 - **Check once.** With *Host checks* off, a button beside the switch asks your hosts one time and keeps what they said, dated, until you press it again. Only that click can: detect, a refresh and a new commit reach nothing while the switch is off. Host checks left on still run by themselves, as they did.
 
-### Changed
-
-- **Claude is told not to read a deploy host on its own.** The rules used to send it to the host's CLI to check an env var name; now it asks first, read-only included.
-
 ### Fixed
 
 - **Tool configs and platform files read as "no longer wired in".** `eslint.config.js` is found by its tool and never imported, and `useThing.web.ts` is imported as `useThing`, so both looked unreferenced, and a proven feature flipped between working and broke.
@@ -31,6 +27,7 @@ Calibration: what noWhat can't read no longer counts against a project.
 
 ### Changed
 
+- **Claude is told not to read a deploy host on its own.** The rules used to send it to the host's CLI to check an env var name; now it asks first, read-only included.
 - **One new host call, behind host checks only:** `railway status --json`, read-only, for the commit Railway's serving deployment names. It's deployment metadata; no variable value is read or kept. Off until you say yes to host checks for the project, like every other host call.
 
 - The headline is the share of features **built**, and, when a deploy can be seen (the deployed app's own answer, Railway's deployed commit, a deploy branch or tag, or the newest store build), how much is **live**. Otherwise it says *live unknown*. Daily progress entries say which measure they used, so the weekly change never compares the two.
