@@ -531,11 +531,17 @@ export function progressOf(features: readonly Feature[]): Progress {
 
 export const progress = (roadmap: Roadmap): Progress => progressOf(roadmap.features)
 
-/** In progress and untouched (no edit, commit or update) for STALE_DAYS days. */
+/** The newest of this feature's own dates (its last update, its last commit); null when neither can be read. */
+export function lastTouchedMs(feature: Feature, lastChange: string | null): number | null {
+  const dates = [Date.parse(feature.updated_at), lastChange ? Date.parse(lastChange) : Number.NaN].filter(Number.isFinite)
+  return dates.length > 0 ? Math.max(...dates) : null
+}
+
+/** In progress and untouched (no edit, commit or update) for STALE_DAYS days, by its own dates. No readable date: not stale, unknown. */
 export function isStale(feature: Feature, lastChange: string | null, nowMs: number): boolean {
   if (feature.status !== 'in_progress') return false
-  const latest = Math.max(Date.parse(feature.updated_at) || 0, lastChange ? Date.parse(lastChange) || 0 : 0)
-  return nowMs - latest >= STALE_DAYS * 86_400_000
+  const latest = lastTouchedMs(feature, lastChange)
+  return latest !== null && nowMs - latest >= STALE_DAYS * 86_400_000
 }
 
 /**

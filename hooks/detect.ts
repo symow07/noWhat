@@ -128,7 +128,7 @@ export function isRouteFile(path: string, frameworks: readonly string[]): boolea
 
 export type Manifest = { path: string; text: string }
 export type TestCommand = { dir: string; argv: string[] }
-export type HostKind = 'railway' | 'eas' | 'vercel' | 'fly' | 'netlify' | 'dotenv'
+export type HostKind = 'railway' | 'eas' | 'vercel' | 'fly' | 'netlify'
 
 /** What a check wants from the hosts. `once` is a person pressing Check once: only that button passes it. */
 export type HostAsk = 'cached' | 'refresh' | 'once' | 'skip'
@@ -256,7 +256,7 @@ export function testCommandsOf(manifests: readonly Manifest[], files: readonly s
 export const MANIFEST_NAMES =
   /(^|\/)(package\.json|pyproject\.toml|pytest\.ini|setup\.cfg|requirements[^/]*\.txt|Pipfile|go\.mod|Cargo\.toml|Gemfile|mix\.exs|Package\.swift|pubspec\.yaml|composer\.json|pom\.xml|build\.gradle(\.kts)?)$/
 
-/** Where the project deploys, from the config files the hosts use. `dotenv` is added by the caller. */
+/** Where the project deploys, from the config files the hosts use. */
 export function hostsOf(files: readonly string[]): HostKind[] {
   const hosts = new Set<HostKind>()
   for (const file of files) {
@@ -760,6 +760,261 @@ export function routeTestsOf(routes: readonly Route[], mounts: ReadonlyMap<strin
   return found
 }
 
+// ---------------------------------------------------------------------------
+// Page routes: a server's screens, counted from the routes it registers
+//
+// One file can hold a hundred routes, so counting files undercounts. A screen
+// is a GET a person opens: not a form's POST, a redirect, a download, an asset,
+// a poll or a sign-in hand-off. Addresses are often not written at the call
+// (`app.get(HOME)`, `for (const s of LIST) app.get(hrefOf(s))`), so constants
+// are followed, across imports, the way the program itself would.
+
+type Constant =
+  | { kind: 'text'; value: string; file: string }
+  | { kind: 'list'; values: string[] }
+  | { kind: 'record'; entries: [string, string][]; file: string }
+  | { kind: 'template'; param: string; value: string; file: string }
+
+const QUOTED = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/
+
+/** The constants a JS or TS file declares that an address could come from. */
+function constantsIn(path: string, text: string): Map<string, Constant> {
+  const constants = new Map<string, Constant>()
+  for (const match of text.matchAll(/(?:^|\n)[ \t]*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=\s*/g)) {
+    const name = match[1] ?? ''
+    const rest = text.slice((match.index ?? 0) + match[0].length, (match.index ?? 0) + match[0].length + 2000)
+    const quoted = new RegExp(`^${QUOTED.source}`).exec(rest)
+    if (quoted) {
+      // A sum or a call is not a plain text constant: leave it unknown.
+      if (/^\s*(;|\n|$)/.test(rest.slice(quoted[0].length))) constants.set(name, { kind: 'text', value: quoted[2] ?? '', file: path })
+      continue
+    }
+    if (rest.startsWith('[')) {
+      const body = rest.slice(1, rest.indexOf(']'))
+      if (/^(\s*(['"`])[^'"`]*\2\s*,?)*\s*$/.test(body)) constants.set(name, { kind: 'list', values: [...body.matchAll(/(['"`])([^'"`]*)\1/g)].map(item => item[2] ?? '') })
+      continue
+    }
+    if (rest.startsWith('{')) {
+      const entries = [...rest.slice(1, rest.indexOf('}')).matchAll(/(?:^|[,\n{])\s*['"]?([\w$-]+)['"]?\s*:\s*(['"`])([^'"`]*)\2/g)].map(entry => [entry[1] ?? '', entry[3] ?? ''] as [string, string])
+      if (entries.length > 0) constants.set(name, { kind: 'record', entries, file: path })
+      continue
+    }
+    const arrow = /^(?:\(\s*([\w$]+)\s*(?::[^)]*)?\)|([\w$]+))\s*(?::[^=]*)?=>\s*`([^`]*)`/.exec(rest)
+    if (arrow) constants.set(name, { kind: 'template', param: arrow[1] ?? arrow[2] ?? '', value: arrow[3] ?? '', file: path })
+  }
+  return constants
+}
+
+const JS_FILE = /\.(ts|mts|cts|js|mjs|cjs)$/
+
+/** A brace-aware look at a handler: whether the first thing it does at its top level, guards aside, is redirect. */
+function redirectsOnly(handler: string): boolean {
+  if (/=>\s*[\w$.]*\.redirect\(/.test(handler.slice(0, handler.search(/\{|$/) + 1))) return true
+  let depth = 0
+  let quote = ''
+  let statement = ''
+  for (const char of handler) {
+    if (quote) {
+      if (char === quote) quote = ''
+      statement += ' '
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      statement += ' '
+      continue
+    }
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth <= 1 && (char === ';' || char === '{' || char === '}')) {
+      const said = statement.trim()
+      if (depth === 1 && /^return\b/.test(said)) return /\.redirect\(/.test(said) && !/\b(render|page|html)/i.test(said)
+      statement = ''
+      continue
+    }
+    if (depth <= 1) statement += char
+  }
+  return false
+}
+
+const NOT_A_PAGE_ADDRESS =
+  /\*|\.[A-Za-z0-9+-]{1,12}$|(^|\/)(assets|static|media|_next|api|hooks?|webhooks?|live|graphql|oauth)(\/|$)|\/(start|callback|logout|signout|sign-out|:?file)$|^\/(health|healthz|livez|readyz|ping|metrics)$/
+
+/** Whether a handler answers with something other than a page: JSON, a file, a download. */
+function answersOtherThanHtml(handler: string): boolean {
+  // Any other type set is what it serves, even with an HTML page for when that fails.
+  if (/\.(?:type|contentType|content_type)\(\s*(?!['"]text\/html)['"]?[\w$]|['"]content-type['"]\s*,\s*(?!['"]text\/html)/i.test(handler)) return true
+  // A wrapper's `{ title, bodyHtml }`, or a page function it calls, is a page however it is returned.
+  if (/html|\.render\(|\brender[A-Z]\w*\(|\.view\(|render_template|TemplateResponse|ExecuteTemplate/i.test(handler)) return false
+  if (/\.(?:type|contentType|content_type)\(\s*['"]?[\w$]|['"]content-type['"]/i.test(handler)) return true
+  return /\.json\(|jsonify\(|\.sendFile\(|\.download\(|send_file\(|\.send\(\s*\{|\breturn\s*\{|=>\s*\(\s*\{/.test(handler)
+}
+
+/** The addresses a project's server routes open as pages, each once. */
+export function pageRoutesOf(files: readonly string[], texts: ReadonlyMap<string, string>): string[] {
+  const fileSet = new Set(files)
+  const code = files.flatMap(path => {
+    const text = texts.get(path)
+    return text !== undefined && SERVER_EXT.test(path) && !isTestFile(path) ? [[path, text] as const] : []
+  })
+  const pageFiles = new Set(code.filter(([path, text]) => rendersPage(path, text)).map(([path]) => path))
+  const constantsOf = new Map<string, Map<string, Constant>>()
+  const constants = (path: string) => {
+    let found = constantsOf.get(path)
+    if (!found) {
+      found = constantsIn(path, texts.get(path) ?? '')
+      constantsOf.set(path, found)
+    }
+    return found
+  }
+  const importsOf = new Map<string, Map<string, string>>()
+  /** A name as seen from a file: declared there, or imported from another. */
+  const lookup = (name: string, path: string): Constant | null => {
+    const here = constants(path).get(name)
+    if (here) return here
+    let imports = importsOf.get(path)
+    if (!imports) {
+      imports = importedNames(texts.get(path) ?? '')
+      importsOf.set(path, imports)
+    }
+    const from = imports.get(name)
+    const file = from === undefined ? null : resolveImport(from, path, fileSet)
+    return file === null ? null : (constants(file).get(name) ?? null)
+  }
+  /** A template with its ${…} filled in; null when any part can't be known. */
+  const expand = (template: string, path: string, vars: ReadonlyMap<string, string>, depth = 0): string | null => {
+    if (depth > 4) return null
+    let known = true
+    const value = template.replace(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g, (_, name: string) => {
+      const bound = vars.get(name)
+      if (bound !== undefined) return bound
+      const constant = lookup(name, path)
+      const text = constant?.kind === 'text' ? expand(constant.value, constant.file, new Map(), depth + 1) : null
+      if (text === null) known = false
+      return text ?? ''
+    })
+    return known && !value.includes('${') ? value : null
+  }
+  /** What a `for (… of X)` walks: the items of a list, or a record's keys. */
+  const itemsOf = (expression: string, path: string): string[] | null => {
+    const keys = /^Object\.keys\(\s*([\w$]+)\s*\)/.exec(expression)?.[1]
+    const named = keys ?? /^([\w$]+)/.exec(expression)?.[1]
+    const constant = named ? lookup(named, path) : null
+    if (constant?.kind === 'list') return constant.values
+    if (constant?.kind === 'record' && keys) return constant.entries.map(([key]) => key)
+    return null
+  }
+  /** Every address an argument to a registration can be, given the loop around it. */
+  const addressesOf = (argument: string, path: string, before: string): string[] => {
+    const literal = new RegExp(`^${QUOTED.source}$`).exec(argument)
+    if (literal) {
+      const value = expand(literal[2] ?? '', path, new Map())
+      return value === null ? [] : [value]
+    }
+    const loop = /for\s*\(\s*const\s+([\w$]+)\s+of\s+([^\n]*?)\)\s*\{?\s*$/.exec(before)
+    const items = loop ? itemsOf(loop[2] ?? '', path) : null
+    const variable = loop?.[1] ?? ''
+    const member = /^([\w$]+)\[\s*([\w$]+)\s*\]$/.exec(argument)
+    if (member) {
+      const record = lookup(member[1] ?? '', path)
+      if (record?.kind !== 'record' || member[2] !== variable || items === null) return []
+      return record.entries.filter(([key]) => items.includes(key)).map(([, value]) => value)
+    }
+    const call = /^([\w$]+)\(\s*([\w$]+)\s*\)$/.exec(argument)
+    if (call) {
+      const template = lookup(call[1] ?? '', path)
+      if (template?.kind !== 'template' || call[2] !== variable || items === null) return []
+      return items.flatMap(item => expand(template.value, template.file, new Map([[template.param, item]])) ?? [])
+    }
+    const constant = /^[\w$]+$/.test(argument) ? lookup(argument, path) : null
+    if (constant?.kind !== 'text') return []
+    const value = expand(constant.value, constant.file, new Map())
+    return value === null ? [] : [value]
+  }
+
+  const mounts = new Map<string, string[]>()
+  for (const [path, text] of code) for (const [file, prefixes] of mountsIn(path, text, fileSet)) mounts.set(file, [...(mounts.get(file) ?? []), ...prefixes])
+
+  const pages = new Set<string>()
+  for (const [path, text] of code) {
+    const found: { at: number; addresses: string[] }[] = []
+    if (JS_FILE.test(path)) {
+      // Any GET given a handler: the address may be written out or come from a constant.
+      for (const match of text.matchAll(/\b[A-Za-z_$][\w$]*\.get(?:<[^()]*>)?\(\s*/g)) {
+        const start = (match.index ?? 0) + match[0].length
+        let depth = 0
+        let quote = ''
+        let end = start
+        for (; end < text.length && end < start + 200; end += 1) {
+          const char = text[end] ?? ''
+          if (quote) {
+            if (char === quote && text[end - 1] !== '\\') quote = ''
+          } else if (char === "'" || char === '"' || char === '`') quote = char
+          else if (char === '(' || char === '[') depth += 1
+          else if (char === ')' || char === ']') {
+            if (depth === 0) break
+            depth -= 1
+          } else if (char === ',' && depth === 0) break
+        }
+        if (text[end] !== ',') continue
+        found.push({ at: match.index ?? 0, addresses: addressesOf(text.slice(start, end).trim(), path, text.slice(Math.max(0, (match.index ?? 0) - 200), match.index ?? 0)) })
+      }
+      for (const match of text.matchAll(/\burl\s*:\s*(['"`])(\/[^'"`\s]*)\1/g)) {
+        // Only a registration's own object: a table of routes elsewhere registers nothing.
+        const at = match.index ?? 0
+        const opens = text.lastIndexOf('{', at)
+        if (opens < 0 || !/\.route\(\s*$/.test(text.slice(Math.max(0, opens - 40), opens))) continue
+        const closes = text.slice(at).search(/[{}]/)
+        const own = text.slice(opens, closes < 0 ? text.length : at + closes)
+        if (/method\s*:\s*\[?\s*['"]GET['"]/.test(own)) found.push({ at, addresses: [match[2] ?? ''] })
+      }
+    } else {
+      for (const pattern of ROUTE_PATTERNS) {
+        pattern.lastIndex = 0
+        for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+          const after = text.slice(match.index, match.index + match[0].length + 80).split('\n')[0] ?? ''
+          if (/\b(post|put|patch|delete|del|head|options)\b|(Post|Put|Patch|Delete)(Mapping)?\b|(POST|PUT|PATCH|DELETE)\b/.test(match[0])) continue
+          if (/methods?\s*=/.test(after) && !/GET/.test(after)) continue
+          const route = match[2] ?? ''
+          if (!/[*]{2}|\$\{/.test(route)) found.push({ at: match.index, addresses: [route.startsWith('/') ? route : `/${route}`] })
+        }
+      }
+    }
+    if (found.length === 0) continue
+    const statements = [
+      ...text.matchAll(/\n[ \t]*(?:[A-Za-z_$][\w$]*\.(?:get|post|put|patch|delete|del|all|head|options|route|register|use|listen|ready|addHook|decorate|setErrorHandler|mount)\b|@|for\s*\()/g),
+    ].map(match => match.index ?? 0)
+    const imported = importedNames(text)
+    for (const route of found) {
+      const end = Math.min(statements.find(at => at > route.at + 1) ?? text.length, route.at + 8000)
+      const handler = text.slice(route.at, end).replace(/\/\*[\s\S]*?\*\/|(^|\s)\/\/[^\n]*/g, '$1')
+      if (answersOtherThanHtml(handler) || redirectsOnly(handler.slice(handler.indexOf(',') + 1))) continue
+      // A page is drawn here, or by a file the handler calls: otherwise this is someone's JSON API.
+      const drawn =
+        pageFiles.has(path) ||
+        [...handler.matchAll(/[A-Za-z_$][\w$]*/g)].some(word => {
+          const from = imported.get(word[0])
+          const file = from === undefined ? null : resolveImport(from, path, fileSet)
+          return file !== null && pageFiles.has(file)
+        })
+      if (!drawn) continue
+      for (const address of route.addresses) {
+        if (NOT_A_PAGE_ADDRESS.test(address)) continue
+        for (const prefix of mounts.get(path) ?? ['']) pages.add(`${prefix}${address === '/' && prefix ? '' : address}`)
+      }
+    }
+  }
+  return [...pages].sort()
+}
+
+/**
+ * How many screens a project has: for a server that registers page routes,
+ * those; otherwise the files that draw one.
+ */
+export function screenCount(screens: readonly string[], pages: ReadonlySet<string>, pageRoutes: readonly string[]): number {
+  return pageRoutes.length > 0 ? pageRoutes.length : new Set([...screens, ...pages]).size
+}
+
 /** What the one-pass read of a project's files says, before git or hosts are asked. */
 export type ScanFacts = {
   references: Map<string, Set<string>>
@@ -767,6 +1022,8 @@ export type ScanFacts = {
   markers: Map<string, number>
   uiStyle: UiStyle
   pages: Set<string>
+  /** The addresses a person opens: for a server, what its screens are counted from. */
+  pageRoutes: string[]
   routes: Route[]
   routeTests: Map<string, Set<string>>
 }
@@ -801,6 +1058,7 @@ export function scanFacts(files: readonly string[], texts: ReadonlyMap<string, s
     markers: new Map(withText(existing).map(([path, text]) => [path, markerCount(text)] as const)),
     uiStyle,
     pages: new Set(uiStyle === 'server' ? code.filter(([path, text]) => rendersPage(path, text)).map(([path]) => path) : []),
+    pageRoutes: uiStyle === 'server' ? pageRoutesOf(files, texts) : [],
     routes,
     routeTests: routeTestsOf(routes, mounts, tests),
   }
@@ -817,6 +1075,16 @@ export function suiteOf(runs: readonly { ok: boolean | null }[], results: Readon
 
 /** Lines run and lines counted per repository file. */
 export type CoverageMap = Map<string, { hit: number; total: number }>
+
+/** The same, with the date of the report each file's figures came from. */
+export type DatedCoverage = Map<string, { hit: number; total: number; atMs: number }>
+
+/** Every package's newest report as one map; a file keeps its own report's date, so an old report only speaks for its own files. */
+export function mergeCoverage(reports: readonly { path: string; atMs: number; found: CoverageMap }[]): { files: DatedCoverage; atMs: number; paths: string[] } {
+  const files: DatedCoverage = new Map()
+  for (const report of reports) for (const [file, seen] of report.found) files.set(file, { ...seen, atMs: report.atMs })
+  return { files, atMs: Math.max(...reports.map(report => report.atMs)), paths: reports.map(report => report.path) }
+}
 
 /** Where test runners write their reports, relative to a package directory. */
 export const COVERAGE_REPORTS = [
@@ -1315,7 +1583,7 @@ export type FeatureEvidence = {
   tests_status: 'pass' | 'fail' | 'none' | 'unknown'
   /** The whole suite's last run: pass when every command passed, null when it hasn't run or couldn't. */
   suite?: 'pass' | 'fail' | null
-  /** Share of its code's lines a coverage report saw run (0 to 1); null with no report, a stale one, or none of its files in it. */
+  /** Share of its code's lines a coverage report saw run (0 to 1), counting only files not changed since their own report; null when no file qualifies. */
   coverage?: number | null
   /** Its latest code is in the deployed commit; null when nothing says which commit is deployed. */
   live?: boolean | null
@@ -1357,27 +1625,38 @@ export type ProjectFacts = {
   pages?: ReadonlySet<string>
   /** The whole suite's last run. */
   suite?: 'pass' | 'fail' | null
-  /** The project's coverage report and when it was written; null without one. */
-  coverage?: { files: CoverageMap; atMs: number } | null
+  /** What the project's coverage reports saw per file, each with its own report's date; null without one. */
+  coverage?: { files: DatedCoverage } | null
   /** The deployed commit and the files changed since; null when no deploy can be seen. */
   deploy?: { commit: string; changed: ReadonlySet<string> } | null
 }
 
-/** The label env presence carries when it came from the project's own .env files. */
+/**
+ * The label a block carries when an earlier version read it off the project's
+ * own .env files. noWhat never opens those now: this only recognises such a
+ * block so it can be lifted.
+ */
 export const LOCAL_ENV = 'local .env'
+
+/**
+ * Keeps every `git grep` out of the project's .env files, in any folder: git
+ * reads what it searches, and a committed .env is still a .env.
+ */
+export const NO_ENV_FILES = [':(exclude,glob)**/.env', ':(exclude,glob)**/.env.*']
 
 /** One host's answer about env var names: what a host check keeps (names only). */
 export type HostNames = { kind: HostKind; label: string; side: 'server' | 'client' | 'both'; ok: boolean; names: readonly string[] }
 
+/** Host answers without the .env answer an earlier version may have left in its evidence file. */
+export const withoutLocalEnv = <T extends { kind: string }>(checks: readonly T[]): T[] => checks.filter(check => check.kind !== 'dotenv')
+
 /**
- * Which env names each side has, and where that was read. A deploy host that
- * couldn't be read leaves its side unknown: the local .env is only the answer
- * for a side no deploy host serves.
+ * Which env names each side has, and where that was read. Only a deploy host
+ * can say: with none, or one that couldn't be read, that side is unknown.
  */
 export function envPresenceOf(checks: readonly HostNames[]): EnvPresence {
   const pick = (side: 'server' | 'client') => {
-    const hosts = checks.filter(check => check.kind !== 'dotenv' && (check.side === side || check.side === 'both'))
-    const host = hosts.find(check => check.ok) ?? (hosts.length > 0 ? null : checks.find(check => check.ok && check.kind === 'dotenv'))
+    const host = withoutLocalEnv(checks).find(check => check.ok && (check.side === side || check.side === 'both'))
     return host ? { source: host.label, names: new Set(host.names) } : null
   }
   return { server: pick('server'), client: pick('client') }
@@ -1447,22 +1726,18 @@ export function featureEvidence(relatedFiles: readonly string[], facts: ProjectF
     if (last === null || Date.parse(seen.last) > Date.parse(last)) last = seen.last
   }
 
-  // Coverage counts only when the report is newer than the feature's last change.
+  // Each file on its own dates: one that changed since its own report says nothing, the others still do.
   const code = files.filter(file => file.exists && file.code)
-  let coverage: number | null = null
-  const report = facts.coverage
-  if (report && code.length > 0 && (last === null || Date.parse(last) <= report.atMs)) {
-    let hit = 0
-    let total = 0
-    for (const file of code) {
-      const seen = report.files.get(file.path)
-      if (seen) {
-        hit += seen.hit
-        total += seen.total
-      }
+  let hit = 0
+  let total = 0
+  for (const file of code) {
+    const seen = facts.coverage?.files.get(file.path)
+    if (seen && (file.last_change === null || Date.parse(file.last_change) <= seen.atMs)) {
+      hit += seen.hit
+      total += seen.total
     }
-    coverage = total > 0 ? hit / total : null
   }
+  const coverage = total > 0 ? hit / total : null
   const deploy = facts.deploy
   const live =
     deploy && code.length > 0 ? !relatedFiles.some(path => deploy.changed.has(path) || facts.uncommitted.has(path)) : null

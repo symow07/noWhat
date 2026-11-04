@@ -7,6 +7,7 @@
 // detect.ts (what the repository says), reconcile.ts (evidence → states),
 // schema.ts (the file format) and view.tsx (the dashboard).
 
+import { liveAnswer } from './insights'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
@@ -17,7 +18,6 @@ import {
   type EnvRead,
   type HostKind,
   type Inventory,
-  LOCAL_ENV,
   LOG_FORMAT,
   MANIFEST_NAMES,
   type Manifest,
@@ -51,6 +51,11 @@ import {
   scanFacts,
   suiteOf,
   uiStyleOf,
+  withoutLocalEnv,
+  screenCount,
+  pageRoutesOf,
+  mergeCoverage,
+  NO_ENV_FILES,
   unsortedFiles,
 } from './detect'
 import { DATA_FILE, EVIDENCE_FILE, type Place, messageOf, placeFrom, projectPath, serial, titleFrom } from './project'
@@ -295,7 +300,7 @@ async function git($: $, cwd: string, args: readonly string[], timeoutMs = 15_00
  */
 async function gitGrep($: $, cwd: string, args: readonly string[]): Promise<string | null> {
   try {
-    const ran = await $.process.run(['git', 'grep', ...args], { cwd, timeoutMs: 30_000 })
+    const ran = await $.process.run(['git', 'grep', ...args, ...NO_ENV_FILES], { cwd, timeoutMs: 30_000 })
     return ran.exitCode <= 1 ? ran.stdout : null
   } catch {
     return null
@@ -340,11 +345,9 @@ async function readTexts($: $, root: string, files: readonly string[], isGit: bo
   return { texts, complete }
 }
 
-/** The newest coverage report in each package, merged; null when the project has none. */
-async function readCoverage($: $, root: string, commands: readonly TestCommand[], files: ReadonlySet<string>): Promise<{ files: CoverageMap; atMs: number; paths: string[] } | null> {
-  const merged: CoverageMap = new Map()
-  const paths: string[] = []
-  let atMs = Number.POSITIVE_INFINITY
+/** The newest coverage report in each package, merged, each file keeping its own report's date; null when the project has none. */
+async function readCoverage($: $, root: string, commands: readonly TestCommand[], files: ReadonlySet<string>): Promise<ReturnType<typeof mergeCoverage> | null> {
+  const reports: Parameters<typeof mergeCoverage>[0][number][] = []
   for (const dir of [...new Set(['', ...commands.map(command => command.dir)])]) {
     let newest: { path: string; mtimeMs: number } | null = null
     for (const report of COVERAGE_REPORTS) {
@@ -360,15 +363,12 @@ async function readCoverage($: $, root: string, commands: readonly TestCommand[]
     if (newest === null) continue
     try {
       const found = parseCoverage(newest.path, String(await $.fs.read(`${root}/${newest.path}`)), root, files)
-      if (found.size === 0) continue
-      for (const [file, seen] of found) merged.set(file, seen)
-      paths.push(newest.path)
-      atMs = Math.min(atMs, newest.mtimeMs)
+      if (found.size > 0) reports.push({ path: newest.path, atMs: newest.mtimeMs, found })
     } catch {
       // Unreadable: no coverage from it.
     }
   }
-  return merged.size > 0 ? { files: merged, atMs, paths } : null
+  return reports.length > 0 ? mergeCoverage(reports) : null
 }
 
 const places = new Map<string, Place>()
@@ -663,7 +663,8 @@ type EvidenceFile = {
     deploy?: { source: string; commit: string; changed: number } | null
   }
   hosts: HostCheck[]
-  live: { url: string; ok: boolean; status: number; checked_at: string; commit?: string | null } | null
+  /** ok and status are null when the app couldn't be reached: unknown, not down. */
+  live: { url: string; ok: boolean | null; status: number | null; checked_at: string; commit?: string | null } | null
   /** The commit the deploy host serves (Railway's deployment metadata), from the last host check. */
   host_deploy?: HostDeploy | null
   /** Pull requests and branches merged on the main line in the last 8 days, with the features they touched. */
@@ -835,7 +836,7 @@ async function checkHosts(
       let names = ran && ran.code === 0 ? envNamesFrom(ran.out, kind) : []
       try {
         const toml = String(await $.fs.read(`${dir}/fly.toml`))
-        names = [...names, ...envNamesFrom(/\[env\]([\s\S]*?)(\n\[|$)/.exec(toml)?.[1] ?? '', 'dotenv')]
+        names = [...names, ...envNamesFrom(/\[env\]([\s\S]*?)(\n\[|$)/.exec(toml)?.[1] ?? '', 'fly')]
       } catch {
         // No [env] section.
       }
@@ -847,17 +848,6 @@ async function checkHosts(
       checks.push({ kind, label: 'Netlify', side: 'both', ok, names: ok && ran ? envNamesFrom(ran.out, kind) : [], ...(ok ? {} : { note: 'netlify CLI not available or site not linked' }) })
     }
   }
-
-  // Local .env files: the source of last resort, used only for a side no host covers.
-  const envNames: string[] = []
-  for (const name of ['.env', '.env.local', '.env.production']) {
-    try {
-      if (await $.fs.exists(`${root}/${name}`)) envNames.push(...envNamesFrom(String(await $.fs.read(`${root}/${name}`)), 'dotenv'))
-    } catch {
-      // Unreadable: skipped.
-    }
-  }
-  if (envNames.length > 0) checks.push({ kind: 'dotenv', label: LOCAL_ENV, side: 'both', ok: true, names: [...new Set(envNames)] })
 
   return { checks, liveUrl, deployed }
 }
@@ -907,13 +897,12 @@ async function gatherUnsorted($: $, root: string, roadmap: Roadmap, existing: Re
 }
 
 /** Files a host check reads, or that change what it would find: their times and HEAD make the key. */
-const HOST_FILES = /(^|\/)(\.env(\.[a-z]+)?|eas\.json|app\.json|app\.config\.[jt]s|railway\.(json|toml)|vercel\.json|fly\.toml|netlify\.toml)$/
+const HOST_FILES = /(^|\/)(eas\.json|app\.json|app\.config\.[jt]s|railway\.(json|toml)|vercel\.json|fly\.toml|netlify\.toml)$/
 
 async function hostsKeyOf($: $, root: string, files: readonly string[], isGit: boolean): Promise<string> {
   const head = isGit ? ((await headOf($, root)) ?? '') : ''
   const stamps: string[] = [head]
   for (const file of files.filter(one => HOST_FILES.test(one)).slice(0, 20)) stamps.push(`${file}:${await mtimeOf($, `${root}/${file}`)}`)
-  for (const file of ['.env', '.env.local', '.env.production']) stamps.push(`${file}:${await mtimeOf($, `${root}/${file}`)}`)
   return stamps.join('|')
 }
 
@@ -970,7 +959,8 @@ async function gatherLaunch(
       const response = await $.http.fetch(privacy.url)
       privacy = { url: privacy.url, status: response.status, checked_at: now }
     } catch {
-      privacy = { url: privacy.url, status: 0, checked_at: now }
+      // No answer says nothing about the page: unknown.
+      privacy = { url: privacy.url, status: null, checked_at: now }
     }
   }
 
@@ -1021,7 +1011,7 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
   // One read of every code, template and config file; wiring, test imports, routes, pages and markers come from it.
   const scanStarted = Date.now()
   const scan = await readTexts($, root, files, isGit)
-  const { references, testImports, markers, uiStyle, pages, routes, routeTests } = scanFacts(files, scan.texts, inventory.frameworks, related)
+  const { references, testImports, markers, uiStyle, pages, pageRoutes, routes, routeTests } = scanFacts(files, scan.texts, inventory.frameworks, related)
   const scanMs = Date.now() - scanStarted
 
   let activity = new Map<string, { last: string; recent: number }>()
@@ -1059,7 +1049,7 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
 
   // Hosts: with the switch on, asked on a refresh, after HOST_TTL_MS, or when HEAD or a host or env file changed; otherwise the last answer stands.
   // With it off, only Check once asks. Its answer stands until the next one; any other answer is dropped.
-  let hosts = previous?.hosts ?? []
+  let hosts = withoutLocalEnv(previous?.hosts ?? [])
   let hostsCheckedAt = previous?.hosts_checked_at ?? null
   let live = previous?.live ?? null
   let hostDeploy = previous?.host_deploy ?? null
@@ -1081,7 +1071,7 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
         // The same answer may say which commit is running: that's what's live.
         live = { url, ok: response.status < 500, status: response.status, checked_at: now, commit: reportedCommit(String(response.text ?? '')) }
       } catch {
-        live = { url, ok: false, status: 0, checked_at: now, commit: null }
+        live = { url, ok: null, status: null, checked_at: now, commit: null }
       }
     }
   }
@@ -1161,7 +1151,7 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
       test_commands: inventory.testCommands,
       tests: inventory.tests,
       file_count: inventory.fileCount,
-      screens: new Set([...inventory.screens, ...pages]).size,
+      screens: screenCount(inventory.screens, pages, pageRoutes),
       routes: inventory.routes.length,
       git: isGit,
       ui_style: uiStyle,
@@ -1254,7 +1244,7 @@ function describeDetection(evidence: EvidenceFile, changes: readonly Change[]): 
       : '',
     project.coverage ? `Coverage: ${project.coverage.paths.join(', ')}.` : '',
     project.deploy ? `Deployed: ${project.deploy.commit}, read from ${project.deploy.source}; ${project.deploy.changed} files changed since.` : '',
-    evidence.live ? `Live: ${evidence.live.url} answered ${evidence.live.status || 'nothing'}.` : '',
+    evidence.live ? `Live: ${evidence.live.url} ${evidence.live.status ? `answered ${evidence.live.status}` : 'unknown (no answer)'}.` : '',
     evidence.launch
       ? `Launch: ${evidence.launch.checks.filter(check => check.state === 'ok').length}/${evidence.launch.checks.length} checks pass${evidence.launch.checks.some(check => check.state === 'fail') ? `; failing: ${evidence.launch.checks.filter(check => check.state === 'fail').map(check => check.label).join(', ')}` : ''}.`
       : '',
@@ -1275,13 +1265,11 @@ async function setupFacts($: $, place: Place): Promise<string> {
   const nowMs = await $.clock.now()
   // A server that renders its own pages: they're found by what the files contain, not where they sit.
   const uiStyle = uiStyleOf(inventory.frameworks, files)
-  const pages =
-    uiStyle === 'server'
-      ? [...(await readTexts($, root, files.filter(file => isSourceFile(file) && !isTestFile(file)), isGit)).texts]
-          .filter(([path, text]) => rendersPage(path, text))
-          .map(([path]) => path)
-      : []
-  const screens = [...new Set([...inventory.screens, ...pages])]
+  const serverTexts = uiStyle === 'server' ? (await readTexts($, root, files.filter(file => isSourceFile(file) && !isTestFile(file)), isGit)).texts : new Map<string, string>()
+  const pages = [...serverTexts].filter(([path, text]) => rendersPage(path, text)).map(([path]) => path)
+  // A server's screens are its page routes; its page files are where to read them.
+  const pageRoutes = pageRoutesOf(files, serverTexts)
+  const screens = pageRoutes.length > 0 ? pageRoutes : [...new Set([...inventory.screens, ...pages])]
 
   const dirs = new Map<string, number>()
   for (const file of files) {
@@ -1470,7 +1458,7 @@ function refusal(errors: readonly string[]): string {
 
 const progressLine = (roadmap: Roadmap) => {
   const p = progress(roadmap)
-  return `${p.builtCount} of ${p.planned} features built (${p.built ?? 0}%)`
+  return `${p.builtCount} of ${p.planned} features built (${p.built === null ? 'unknown' : `${p.built}%`})`
 }
 
 const UI_STYLE_WORDS: Record<UiStyle, string> = {
@@ -1560,7 +1548,7 @@ async function loadProjects($: $, here: string): Promise<ProjectSummary[]> {
         roadmap: loaded.roadmap,
         exists: loaded.exists,
         evidence: evidence?.features ?? {},
-        live: evidence?.live ? evidence.live.ok : null,
+        live: evidence?.live ? (liveAnswer(evidence.live) ?? 'unknown') : null,
       },
       nowMs,
     )
@@ -2053,7 +2041,7 @@ export const register: Register = (on, options) => {
         evidence: evidence?.features ?? {},
         capabilities: {
           tests: (evidence?.project.test_commands.length ?? 0) > 0,
-          hosts: (evidence?.hosts ?? []).some(host => host.kind !== 'dotenv'),
+          hosts: withoutLocalEnv(evidence?.hosts ?? []).length > 0,
           git: evidence?.project.git ?? true,
         },
         live: evidence?.live ?? null,
@@ -2063,7 +2051,7 @@ export const register: Register = (on, options) => {
             (evidence?.project.screens ?? 0) > 0 ||
             (loaded.roadmap?.features.some(feature => feature.kind === 'ui' && feature.ui_state !== 'none') ?? false) ||
             !(loaded.roadmap?.features.some(feature => feature.kind === 'ui') ?? false),
-          screens: evidence?.project.screens ?? 0,
+          screens: evidence?.project.screens ?? null,
           tests: evidence?.project.tests.length ?? 0,
           unmappedTests: evidence?.project.unmapped_tests ?? 0,
           deployable: (evidence?.project.hosts.length ?? 0) > 0 || (evidence?.project.deploy ?? null) !== null,

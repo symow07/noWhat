@@ -3,7 +3,7 @@
 // Pure, and terse by design: every string here is a headline or a fact.
 
 import type { FeatureEvidence } from './detect'
-import { type Feature, type Roadmap, type Status, ago, isBuilt, isStale, nextUp, progress } from './schema'
+import { type Feature, type Roadmap, type Status, ago, isBuilt, isStale, lastTouchedMs, nextUp, progress } from './schema'
 
 /** Untouched this many days: the project is stalled, and the sidebar says so. */
 export const STALLED_DAYS = 14
@@ -99,21 +99,19 @@ export function catchUp(roadmap: Roadmap, since: string, commits: number): Catch
   return isQuiet ? null : result
 }
 
-/** When anything last moved, in ms: the roadmap's own last touch, or the newest commit to any feature. */
-export function lastActive(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>): number {
-  let last = Date.parse(roadmap.last_touched) || 0
-  for (const ev of Object.values(evidence)) {
-    if (ev.last_change) last = Math.max(last, Date.parse(ev.last_change) || 0)
-  }
-  return last
+/** When anything last moved, in ms: the roadmap's own last touch, or the newest commit to any feature. Null when no date can be read. */
+export function lastActive(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>): number | null {
+  const dates = [roadmap.last_touched, ...Object.values(evidence).map(ev => ev.last_change ?? '')].map(date => Date.parse(date)).filter(Number.isFinite)
+  return dates.length > 0 ? Math.max(...dates) : null
 }
 
-/** Days since anything moved. */
-export function untouchedDays(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): number {
-  return Math.max(0, Math.floor((nowMs - lastActive(roadmap, evidence)) / DAY))
+/** Days since anything moved; null when that can't be read. */
+export function untouchedDays(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): number | null {
+  const last = lastActive(roadmap, evidence)
+  return last === null ? null : Math.max(0, Math.floor((nowMs - last) / DAY))
 }
 
-export type Health = { kind: 'thriving' | 'steady' | 'stalled' | 'needs_you'; label: string; detail: string }
+export type Health = { kind: 'thriving' | 'steady' | 'stalled' | 'needs_you' | 'unknown'; label: string; detail: string }
 
 /**
  * How the project is doing, for a glance across projects:
@@ -128,9 +126,10 @@ export function healthOf(roadmap: Roadmap, evidence: Readonly<Record<string, Fea
   const inProgress = roadmap.features.filter(feature => feature.status === 'in_progress')
   const moving = inProgress.filter(feature => !isStale(feature, evidence[feature.id]?.last_change ?? null, nowMs))
 
-  if (days >= STALLED_DAYS) return { kind: 'stalled', label: 'Stalled', detail: `Untouched ${days} days` }
+  if (days !== null && days >= STALLED_DAYS) return { kind: 'stalled', label: 'Stalled', detail: `Untouched ${days} days` }
   if (needsYou > 0) return { kind: 'needs_you', label: 'Needs you', detail: `${needsYou} waiting on you` }
   if (inProgress.length > 0 && moving.length === 0) return { kind: 'stalled', label: 'Stalled', detail: 'Work in progress has gone stale' }
+  if (days === null) return { kind: 'unknown', label: 'Unknown', detail: 'Last activity unknown' }
   if (days < ACTIVE_DAYS) return { kind: 'thriving', label: 'Thriving', detail: days === 0 ? 'Active today' : `Active ${days}d ago` }
   return { kind: 'steady', label: 'Steady', detail: `Last active ${days} days ago` }
 }
@@ -144,6 +143,16 @@ export function rabbitHoles(roadmap: Roadmap): { feature: Feature; sessions: num
     .sort((a, b) => b.sessions - a.sessions)
 }
 
+/** What the deployed app said: a status when it answered; no status when it couldn't be reached. */
+export type LiveAnswer = { ok: boolean | null; status: number | null }
+
+/**
+ * Whether the deployed app is up, as far as anyone can tell: only an answer can
+ * say. No answer (this machine offline, DNS, a refused connection) is unknown,
+ * null. A status of 0 is how an earlier version wrote no answer.
+ */
+export const liveAnswer = (live: LiveAnswer): boolean | null => (live.status ? live.ok : null)
+
 export type Alert = { kind: 'broke' | 'down' | 'rabbit' | 'stale' | 'quiet'; label: string; text: string }
 
 /**
@@ -153,7 +162,7 @@ export type Alert = { kind: 'broke' | 'down' | 'rabbit' | 'stale' | 'quiet'; lab
 export function alertsOf(
   roadmap: Roadmap,
   evidence: Readonly<Record<string, FeatureEvidence>>,
-  live: { ok: boolean; status: number } | null,
+  live: LiveAnswer | null,
   nowMs: number,
 ): Alert[] {
   const alerts: Alert[] = []
@@ -162,17 +171,19 @@ export function alertsOf(
     const reason = feature.regressed.reason === 'tests fail' ? `Tests fail since ${ago(feature.regressed.at, nowMs)}.` : `${capital(feature.regressed.reason)}.`
     alerts.push({ kind: 'broke', label: 'Broke', text: `${feature.title}. ${reason}` })
   }
-  if (live && !live.ok) alerts.push({ kind: 'down', label: 'Down', text: live.status ? `Deployed app answers ${live.status}.` : 'Deployed app not answering.' })
+  if (live && liveAnswer(live) === false) alerts.push({ kind: 'down', label: 'Down', text: `Deployed app answers ${live.status}.` })
   for (const hole of rabbitHoles(roadmap)) {
     alerts.push({ kind: 'rabbit', label: 'Rabbit hole', text: `${hole.feature.title}. ${hole.sessions} sessions, no progress.` })
   }
   for (const feature of roadmap.features) {
-    if (isStale(feature, evidence[feature.id]?.last_change ?? null, nowMs)) {
-      alerts.push({ kind: 'stale', label: 'Stale', text: `${feature.title}. In progress, untouched ${ago(feature.updated_at, nowMs).replace(' ago', '')}.` })
+    const lastChange = evidence[feature.id]?.last_change ?? null
+    if (isStale(feature, lastChange, nowMs)) {
+      const touched = new Date(lastTouchedMs(feature, lastChange) ?? nowMs).toISOString()
+      alerts.push({ kind: 'stale', label: 'Stale', text: `${feature.title}. In progress, untouched ${ago(touched, nowMs).replace(' ago', '')}.` })
     }
   }
   const days = untouchedDays(roadmap, evidence, nowMs)
-  if (days >= STALLED_DAYS) alerts.push({ kind: 'quiet', label: 'Untouched', text: `${days} days. Pick it up or park it.` })
+  if (days !== null && days >= STALLED_DAYS) alerts.push({ kind: 'quiet', label: 'Untouched', text: `${days} days. Pick it up or park it.` })
   return alerts
 }
 
@@ -241,7 +252,7 @@ export function weeklySummary(roadmap: Roadmap, evidence: Readonly<Record<string
 
   return [
     `${roadmap.name} · week of ${shortDate(monday.toISOString())}`,
-    `Built ${overall ?? 0}%${delta}. Done: ${week.done.length > 0 ? list(week.done, 3) : 'nothing'}${merges ? `; ${merges}` : ''}.`,
+    `Built ${overall === null ? 'unknown' : `${overall}%`}${delta}. Done: ${week.done.length > 0 ? list(week.done, 3) : 'nothing'}${merges ? `; ${merges}` : ''}.`,
     waiting.length > 0 ? `Waiting on you: ${waiting.length} (${list(waiting.map(feature => feature.title), 3)}).` : '',
     broke.length > 0 ? `Broke: ${list(broke.map(feature => feature.title), 3)}.` : '',
     next ? `Next: ${next.title}.` : '',
