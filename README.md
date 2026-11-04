@@ -11,7 +11,7 @@ Out of the box, noWhat makes no network calls of its own. No telemetry, no updat
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg)](https://code.claude.com/docs/en/plugins/mods/overview)
-[![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-informational.svg)](.claude-plugin/plugin.json)
 
 <img src="docs/media/hero.gif" alt="The noWhat sidebar beside a Claude Code session" width="460">
 

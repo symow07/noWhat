@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 Calibration: what noWhat can't read no longer counts against a project.
 
