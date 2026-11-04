@@ -33,6 +33,7 @@ function feature(id: string, fields: Partial<Feature> = {}): Feature {
     ui_state: 'none',
     functional_state: 'none',
     verified_by: null,
+    status_by: null,
     blocker_reason: null,
     blocked_on: null,
     auto_blocked: null,
@@ -123,7 +124,7 @@ describe('validate', () => {
 })
 
 describe('progress', () => {
-  test('averages UI and functional, counting queued and not started as 0', () => {
+  test('the headline is the share built; UI and functional stay as detail', () => {
     const p = progress(
       roadmap([
         feature('a', { status: 'done', ui_state: 'polished', functional_state: 'working' }),
@@ -135,7 +136,8 @@ describe('progress', () => {
     // UI over a, b, c: (1 + 1 + 0) / 3. Functional over all four: (1 + 0.5 + 0 + 1) / 4.
     expect(p.ui).toBe(67)
     expect(p.functional).toBe(63)
-    expect(p.overall).toBe(65)
+    // Built: a (done, working) and d (working), 2 of 4; the count and the percentage are one measure.
+    expect({ built: p.built, builtCount: p.builtCount, planned: p.planned, overall: p.overall }).toEqual({ built: 50, builtCount: 2, planned: 4, overall: 50 })
     expect(p.counts).toEqual({ queued: 1, not_started: 0, in_progress: 2, blocked: 0, parked: 0, done: 1 })
     expect(p.designedNotWorking).toEqual(['b'])
   })
@@ -156,13 +158,16 @@ describe('progress', () => {
 })
 
 describe('applyUpdate', () => {
-  test('done changes no state, and an unconfirmed done shows as unverified', () => {
+  test('done changes no state, and an unconfirmed done is still built, marked unconfirmed', () => {
     const before = roadmap([feature('a', { status: 'in_progress', ui_state: 'designed', functional_state: 'partial' })])
     const applied = applyUpdate(before, { changes: [{ id: 'a', status: 'done' }] }, context)
     expect(applied.roadmap?.features[0]).toMatchObject({ ui_state: 'designed', functional_state: 'partial' })
     expect(applied.roadmap?.features[0]?.last_conversation?.title).toBe('Wire up login')
     expect(applied.stopped).toEqual(['a'])
-    expect(progress(applied.roadmap as Roadmap).unverified).toEqual(['a'])
+    expect(progress(applied.roadmap as Roadmap).unconfirmed).toEqual(['a'])
+    expect(progress(applied.roadmap as Roadmap).built).toBe(100)
+    // Claude set it: detection keeps it.
+    expect(applied.roadmap?.features[0]?.status_by).toBe('claude')
   })
 
   test('working needs verified_by, which goes again when it stops working', () => {
@@ -171,7 +176,9 @@ describe('applyUpdate', () => {
     expect(refused.errors[0]).toContain('working needs verified_by')
     const confirmed = applyUpdate(before, { changes: [{ id: 'a', functional_state: 'working', verified_by: 'tests' }] }, context)
     expect(confirmed.roadmap?.features[0]?.verified_by).toBe('tests')
-    expect(progress(confirmed.roadmap as Roadmap).unverified).toEqual([])
+    expect(progress(confirmed.roadmap as Roadmap).unconfirmed).toEqual([])
+    // Coverage and suite are detection's to claim, never Claude's.
+    expect(applyUpdate(before, { changes: [{ id: 'a', functional_state: 'working', verified_by: 'suite' as never }] }, context).errors[0]).toContain('verified_by')
     const broken = applyUpdate(confirmed.roadmap as Roadmap, { changes: [{ id: 'a', functional_state: 'partial' }] }, context)
     expect(broken.roadmap?.features[0]?.verified_by).toBeNull()
   })
@@ -424,9 +431,9 @@ describe('history, ideas, sessions, decisions', () => {
     const base = { ...roadmap([feature('a')]), project_id: 'p-1' }
     const day1 = recordProgress(base, NOW)
     const again = recordProgress(day1, LATER)
-    expect(again.progress_log).toEqual([{ day: '2026-10-12', overall: 0 }])
+    expect(again.progress_log).toEqual([{ day: '2026-10-12', overall: 0, measure: 'built' }])
     const read = validate(JSON.parse(serialize(again)), NOW).roadmap as Roadmap
-    expect(read).toMatchObject({ project_id: 'p-1', progress_log: [{ day: '2026-10-12', overall: 0 }], decisions: [] })
+    expect(read).toMatchObject({ project_id: 'p-1', progress_log: [{ day: '2026-10-12', overall: 0, measure: 'built' }], decisions: [] })
   })
 })
 

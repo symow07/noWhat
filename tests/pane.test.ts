@@ -171,6 +171,25 @@ test('rows open on click; the queue reorders and pins from the details; done unf
   expect(await ui.find({ type: 'Text', text: 'Unpin status' })).toBeDefined()
 })
 
+test('only actions are buttons: on a desktop a name is text, and Details opens its row', async ($, on) => {
+  await sample($, on)
+  const desktop = await mountPane($, 'desktop')
+  // A desktop draws every Button as a native button: no feature name may be one.
+  const labels = (await desktop.findAll({ type: 'Button' })).map(button => button.text)
+  for (const title of ['Login screen', 'Password reset email', 'Tags']) expect(labels.some(label => label.includes(title))).toBe(false)
+  expect(await desktop.find({ type: 'Text', text: 'Tags' })).toBeDefined()
+  expect((await desktop.find({ key: 'feature:login' }))?.text).toBe('Details')
+  await desktop.press({ key: 'feature:login' })
+  expect((await desktop.find({ key: 'feature:login' }))?.text).toBe('Hide')
+  // Sections say what their button does; the label beside it is text.
+  expect((await desktop.find({ key: 'section:drawer:progress' }))?.text).toBe('Show')
+  expect(await desktop.find({ type: 'Text', text: 'Milestones' })).toBeUndefined()
+  // The terminal draws a plain Button as its text, so there the name itself opens the row.
+  const terminal = await mountPane($, 'terminal')
+  expect((await terminal.find({ key: 'feature:reset' }))?.text).toContain('Password reset email')
+  expect((await terminal.find({ key: 'section:drawer:progress' }))?.text).toContain('▸ Progress')
+})
+
 test('milestones group the rows and open with their own bars', async ($, on) => {
   await sample($, on, {
     milestones: [
@@ -206,6 +225,17 @@ test('a regression shows the alert strip and becomes next up', async ($, on) => 
     expect(next.length).toBeGreaterThan(0)
     expect(await ui.find({ type: 'Text', text: /^Broke: tests fail/ })).toBeDefined()
   }
+})
+
+test('Check once sits beside the switch while it is off, and says when it last asked', async ($, on) => {
+  await sample($, on)
+  const ui = await mountPane($, 'desktop')
+  await ui.press({ key: 'hosts:no' })
+  expect(await ui.find({ key: 'hosts:once' })).toBeDefined()
+  await ui.press({ key: 'hosts:once' })
+  expect(await ui.find({ type: 'Text', text: /^Hosts checked just now, by Check once/ })).toBeDefined()
+  await ui.press({ key: 'hosts:toggle' })
+  expect(await ui.find({ key: 'hosts:once' })).toBeUndefined()
 })
 
 test('refresh re-checks now without tests, and the summary copies in one click', async ($, on) => {
@@ -300,4 +330,32 @@ test('a parked feature says Parked, whatever its states', async ($, on) => {
   const labels = (await ui.findAll({ type: 'Svg' })).map(svg => String(svg.props.alt))
   expect(labels).toContain('Parked')
   expect(labels).not.toContain('UI ahead')
+})
+
+test('the alert strip says Down for a refused connection, not for a request that got no answer', async ($, on) => {
+  const w = await sample($, on)
+  const evidence = JSON.parse(w.files.get(EVIDENCE)?.text ?? 'null') ?? {
+    version: 2,
+    checked_at: '2026-10-12T20:00:00.000Z',
+    hosts_checked_at: null,
+    project: { languages: [], frameworks: [], hosts: [], test_commands: [], tests: [], file_count: 1, screens: 0, routes: 0, git: true },
+    hosts: [],
+    live: null,
+    test_runs: [],
+    test_results: {},
+    features: {},
+  }
+  const base = { url: 'https://app.example.com', checked_at: '2026-10-12T20:00:00.000Z', commit: null }
+  let stamp = 100
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const showing = async (live: Record<string, unknown>) => {
+      w.files.set(EVIDENCE, { text: JSON.stringify({ ...evidence, live: { ...base, ...live } }), mtimeMs: (stamp += 1) })
+      await ui.press({ key: 'tab:features' })
+      return ui.find({ type: 'Text', text: /^Down:/ })
+    }
+    expect(await showing({ ok: null, status: null })).toBeUndefined()
+    expect(await showing({ ok: false, status: null, refused: true })).toBeDefined()
+    expect(await showing({ ok: null, status: null })).toBeUndefined()
+  }
 })

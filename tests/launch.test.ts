@@ -103,3 +103,12 @@ describe('the checklist', () => {
     expect(states(web)).toEqual({ privacy: 'ok', terms: 'fail', https: 'ok', consent: 'fail' })
   })
 })
+
+test("a privacy page that couldn't be reached is unknown, not failing; one that answered 404 is failing", () => {
+  const privacy = (status: number | null) =>
+    launchChecks(app({ privacy: { url: 'https://acme.example/privacy', status } })).find(check => check.id === 'privacy')
+  expect(privacy(null)?.state).toBe('unknown')
+  // Written by an earlier version: a status of 0 only ever meant no answer.
+  expect(privacy(0)?.state).toBe('unknown')
+  expect(privacy(404)?.state).toBe('fail')
+})

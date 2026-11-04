@@ -7,48 +7,64 @@
 // detect.ts (what the repository says), reconcile.ts (evidence → states),
 // schema.ts (the file format) and view.tsx (the dashboard).
 
+import { isConnectionRefused, liveAnswer } from './insights'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import {
+  COVERAGE_REPORTS,
+  type CoverageMap,
   ENV_MODULE,
-  type EnvPresence,
   type EnvRead,
   type HostKind,
   type Inventory,
   LOG_FORMAT,
   MANIFEST_NAMES,
-  MARKER_PATTERN,
   type Manifest,
+  type Merge,
   type TestCommand,
+  type UiStyle,
   declaredNames,
+  deployRefOf,
+  easProfileNames,
+  railwayDeployOf,
+  asksHosts,
+  type HostAsk,
+  envPresenceOf,
   envNamesFrom,
   envReads,
   featureEvidence,
   inventoryOf,
+  isScannable,
   isSourceFile,
   isTestCommand,
   isTestFile,
   optionalInSchema,
+  parseCoverage,
   parseGitActivity,
   parseGitCommits,
-  parseGrepCounts,
-  importNames,
-  importPatterns,
-  parseGrepMatches,
-  parseImportMatches,
-  sourceNameCounts,
-  unsortedFiles,
+  parseMerges,
   parseStatus,
   parseTestRun,
-  referenceNames,
+  rendersPage,
+  reportedCommit,
+  scanFacts,
+  suiteOf,
+  uiStyleOf,
+  withoutLocalEnv,
+  screenCount,
+  pageRoutesOf,
+  mergeCoverage,
+  NO_ENV_FILES,
+  unsortedFiles,
 } from './detect'
 import { DATA_FILE, EVIDENCE_FILE, type Place, messageOf, placeFrom, projectPath, serial, titleFrom } from './project'
-import { LAUNCH_PATTERNS, type LaunchCheck, type LaunchKind, type LaunchPattern, deviceBuildOf, launchChecks, launchKind, privacyUrlOf } from './launch'
+import { LAUNCH_PATTERNS, type LaunchCheck, type LaunchKind, type LaunchPattern, deviceBuildOf, launchChecks, launchKind, privacyUrlOf, storeCommitOf } from './launch'
 import { type ProjectSummary, sortProjects, summarize } from './portfolio'
 import { type Evidence, initialStatus, reconcile, signalsOf } from './reconcile'
 import {
   BLOCKERS,
+  CLAUDE_VERIFICATIONS,
   type Change,
   type Conversation,
   type Feature,
@@ -59,7 +75,6 @@ import {
   type Snapshot,
   UI_STATES,
   type UpdateInput,
-  VERIFICATIONS,
   ago,
   applyUpdate,
   captureIdea,
@@ -132,7 +147,7 @@ const FEATURE_FIELDS = {
   status: { enum: STATUSES },
   ui_state: { enum: UI_STATES, description: 'ui features only; leave out for logic' },
   functional_state: { enum: FUNCTIONAL_STATES, description: 'working only once confirmed, with verified_by' },
-  verified_by: { enum: VERIFICATIONS, description: 'how working was confirmed: ran it, tests pass, or the user said so' },
+  verified_by: { enum: CLAUDE_VERIFICATIONS, description: 'how working was confirmed: ran it, tests pass, or the user said so' },
   blocker_reason: { type: 'string', description: 'required when blocked: what it waits on' },
   blocked_on: { enum: BLOCKERS, description: 'when blocked: you (keys, accounts, a decision) or code' },
   needs_config: {
@@ -195,7 +210,7 @@ const UPDATE_SPEC = {
 const SETUP_SPEC = {
   name: 'setup',
   description:
-    "Save this project's features as .claude/nowhat.json, once the user has run /nowhat here. Give each feature the files that implement it (related_files): the plugin reads the evidence for those files (wiring, tests, git activity, config) and sets every state it can prove. Leave status out unless the code can't show it (planned work: not_started or queued). Fails if the file exists, unless replace is true.",
+    "Save this project's features as .claude/nowhat.json, once the user has run /nowhat here. Give each feature the files that implement it (related_files): the plugin reads the evidence for those files (wiring, tests, git activity, config) and sets every state it can prove. Give status where you know it: done for work you know is finished (merged, shipped), in_progress for work underway, not_started or queued for planned work; leave it out when unsure and the evidence derives it. Fails if the file exists, unless replace is true.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -231,7 +246,7 @@ const CONTEXT_SPEC = {
 const DETECT_SPEC = {
   name: 'detect',
   description:
-    "Re-read the evidence for every feature now (wiring, TODO markers, git activity, the deploy host's env var names, and with tests: true the project's test suites) and apply what it proves to .claude/nowhat.json. Returns what changed.",
+    "Re-read the evidence for every feature now (wiring, TODO markers, git activity, the deploy host's env var names if the user turned Host checks on, and with tests: true the project's test suites) and apply what it proves to .claude/nowhat.json. Returns what changed.",
   inputSchema: {
     type: 'object',
     properties: { tests: { type: 'boolean', description: "also run the project's test suites (slow)" } },
@@ -279,14 +294,81 @@ async function git($: $, cwd: string, args: readonly string[], timeoutMs = 15_00
   }
 }
 
-/** `git grep` answers 1 for "no match": that is an empty result, not a failure. */
-async function gitGrep($: $, cwd: string, args: readonly string[]): Promise<string> {
+/**
+ * `git grep` answers 1 for "no match": that is an empty result, not a failure.
+ * A failure or a timeout is null: unknown, never "nothing found".
+ */
+async function gitGrep($: $, cwd: string, args: readonly string[]): Promise<string | null> {
   try {
-    const ran = await $.process.run(['git', 'grep', ...args], { cwd, timeoutMs: 30_000 })
-    return ran.exitCode <= 1 ? ran.stdout : ''
+    const ran = await $.process.run(['git', 'grep', ...args, ...NO_ENV_FILES], { cwd, timeoutMs: 30_000 })
+    return ran.exitCode <= 1 ? ran.stdout : null
   } catch {
-    return ''
+    return null
   }
+}
+
+/** Text read per check: past this, what a scan would say about the rest is unknown. */
+const SCAN_BYTES = 96_000_000
+const SCAN_FILE_BYTES = 8_000_000
+
+/**
+ * The text of every code, template and config file, read once per check:
+ * wiring, test imports, routes, pages and markers all come from it. `complete`
+ * is false when a file couldn't be read or the walk was bounded, so a name
+ * found nowhere is then unknown rather than unreferenced.
+ */
+async function readTexts($: $, root: string, files: readonly string[], isGit: boolean): Promise<{ texts: Map<string, string>; complete: boolean }> {
+  const texts = new Map<string, string>()
+  const wanted = files.filter(isScannable)
+  let complete = isGit
+  let total = 0
+  for (let at = 0; at < wanted.length; at += 32) {
+    const batch = await Promise.all(
+      wanted.slice(at, at + 32).map(async path => {
+        try {
+          return [path, String(await $.fs.read(`${root}/${path}`))] as const
+        } catch {
+          return null
+        }
+      }),
+    )
+    for (const entry of batch) {
+      if (entry === null || entry[1].length > SCAN_FILE_BYTES) {
+        complete = false
+        continue
+      }
+      total += entry[1].length
+      if (total > SCAN_BYTES) return { texts, complete: false }
+      texts.set(entry[0], entry[1])
+    }
+  }
+  return { texts, complete }
+}
+
+/** The newest coverage report in each package, merged, each file keeping its own report's date; null when the project has none. */
+async function readCoverage($: $, root: string, commands: readonly TestCommand[], files: ReadonlySet<string>): Promise<ReturnType<typeof mergeCoverage> | null> {
+  const reports: Parameters<typeof mergeCoverage>[0][number][] = []
+  for (const dir of [...new Set(['', ...commands.map(command => command.dir)])]) {
+    let newest: { path: string; mtimeMs: number } | null = null
+    for (const report of COVERAGE_REPORTS) {
+      const path = dir === '' ? report : `${dir}/${report}`
+      try {
+        if (!(await $.fs.exists(`${root}/${path}`))) continue
+        const stat = await $.fs.stat(`${root}/${path}`)
+        if (stat.size <= 40_000_000 && (newest === null || stat.mtimeMs > newest.mtimeMs)) newest = { path, mtimeMs: stat.mtimeMs }
+      } catch {
+        // Unreadable: no report there.
+      }
+    }
+    if (newest === null) continue
+    try {
+      const found = parseCoverage(newest.path, String(await $.fs.read(`${root}/${newest.path}`)), root, files)
+      if (found.size > 0) reports.push({ path: newest.path, atMs: newest.mtimeMs, found })
+    } catch {
+      // Unreadable: no coverage from it.
+    }
+  }
+  return reports.length > 0 ? mergeCoverage(reports) : null
 }
 
 const places = new Map<string, Place>()
@@ -532,11 +614,16 @@ type HostCheck = {
   note?: string
 }
 
+/** The commit a deploy host says it's serving, and where that was read. */
+type HostDeploy = { commit: string; at: string | null; source: string }
+
 type LaunchEvidence = {
   kind: LaunchKind
   checks: LaunchCheck[]
   privacy: { url: string; status: number | null; checked_at: string | null } | null
   device_build: 'device' | 'simulator' | 'none' | null
+  /** The commit of the newest finished store build, from the same build list. */
+  store_commit?: string | null
 }
 
 type EvidenceFile = {
@@ -545,6 +632,8 @@ type EvidenceFile = {
   hosts_checked_at: string | null
   /** What host checks depend on (HEAD, host and env file times): a change re-checks them early. */
   hosts_key?: string | null
+  /** With the switch off: what the hosts said came from Check once, so it stays until the next one. */
+  hosts_once?: boolean
   launch?: LaunchEvidence | null
   /** New source files no feature claims, for the sidebar's Unsorted group. */
   unsorted?: string[]
@@ -558,9 +647,28 @@ type EvidenceFile = {
     screens: number
     routes: number
     git: boolean
+    /** What draws the screens: decided first, then screens are found its way. */
+    ui_style?: UiStyle
+    /** Server files that render a page (the server UI style). */
+    pages?: number
+    /** Routes registered in code, which tests are mapped through. */
+    registered_routes?: number
+    /** Test files no feature's evidence includes, and the first of them. */
+    unmapped_tests?: number
+    unmapped_sample?: string[]
+    /** The one-pass read wiring comes from: files read, and whether that was all of them. */
+    scan?: { files: number; complete: boolean; ms: number }
+    coverage?: { paths: string[]; at: string } | null
+    /** Which commit is deployed, and where that was read. */
+    deploy?: { source: string; commit: string; changed: number } | null
   }
   hosts: HostCheck[]
-  live: { url: string; ok: boolean; status: number; checked_at: string } | null
+  /** ok and status are null when nothing came back: unknown. refused: the address turned the connection down, so down. */
+  live: { url: string; ok: boolean | null; status: number | null; refused?: boolean; checked_at: string; commit?: string | null } | null
+  /** The commit the deploy host serves (Railway's deployment metadata), from the last host check. */
+  host_deploy?: HostDeploy | null
+  /** Pull requests and branches merged on the main line in the last 8 days, with the features they touched. */
+  merged?: { at: string; pr: number | null; subject: string; features: string[] }[]
   test_runs: { dir: string; command: string; ok: boolean | null; at: string; note?: string }[]
   test_results: Record<string, { ok: boolean; at: string }>
   features: Evidence
@@ -637,9 +745,10 @@ async function checkHosts(
   files: readonly string[],
   inventory: Inventory,
   manifests: readonly Manifest[],
-): Promise<{ checks: HostCheck[]; liveUrl: string | null }> {
+): Promise<{ checks: HostCheck[]; liveUrl: string | null; deployed: HostDeploy | null }> {
   const checks: HostCheck[] = []
   let liveUrl: string | null = null
+  let deployed: HostDeploy | null = null
   const at = (dir: string | null) => (dir === null || dir === '' ? root : `${root}/${dir}`)
 
   for (const kind of inventory.hosts) {
@@ -659,9 +768,17 @@ async function checkHosts(
           return false
         }
       }
+      // Which commit is deployed: deployment metadata, read-only, never a variable's value.
+      const deployOf = async (argv: string[]) => {
+        const status = await run($, argv, root, 60_000)
+        const found = status && status.code === 0 ? railwayDeployOf(status.out) : null
+        if (found) deployed ??= { ...found, source: label }
+      }
       const linked = await run($, ['railway', 'variables', '--json'], root)
-      if (linked && linked.code === 0 && take(linked.out)) ok = true
-      else if (linked !== null) {
+      if (linked && linked.code === 0 && take(linked.out)) {
+        ok = true
+        await deployOf(['railway', 'status', '--json'])
+      } else if (linked !== null) {
         // Not linked here: find the project by the repository's own names (its folder, its packages).
         note = 'no Railway project matches this repository'
         const wanted = new Set([root.split('/').pop() ?? '', ...manifests.map(manifest => String(/"name"\s*:\s*"([^"]+)"/.exec(manifest.text)?.[1] ?? ''))].map(squash).filter(Boolean))
@@ -682,6 +799,7 @@ async function checkHosts(
               if (vars && vars.code === 0 && take(vars.out)) ok = true
             }
             label = `Railway (${environment})`
+            await deployOf(['railway', 'status', '--project', String(project.id), '--environment', environment, '--json'])
           }
         } catch {
           // An unparseable listing is unknown, never "missing".
@@ -689,14 +807,22 @@ async function checkHosts(
       }
       checks.push({ kind, label, side: 'server', ok, names: [...new Set(names)], ...(ok ? {} : { note }) })
     } else if (kind === 'eas') {
-      const ran = await run($, ['eas', 'env:list', '--environment', 'production'], at(dirContaining(files, /(^|\/)eas\.json$/)), 60_000)
+      const dir = at(dirContaining(files, /(^|\/)eas\.json$/))
+      const ran = await run($, ['eas', 'env:list', '--environment', 'production'], dir, 60_000)
       const ok = ran !== null && ran.code === 0 && /Environment:/i.test(ran.out)
+      // What the production build profile sets in eas.json is in the build too.
+      let profile: string[] = []
+      try {
+        profile = easProfileNames(String(await $.fs.read(`${dir}/eas.json`)))
+      } catch {
+        // No profile to read.
+      }
       checks.push({
         kind,
         label: 'EAS (production)',
         side: 'client',
         ok,
-        names: ok && ran ? envNamesFrom(ran.out, kind) : [],
+        names: ok && ran ? [...new Set([...envNamesFrom(ran.out, kind), ...profile])] : [],
         ...(ok ? {} : { note: ran === null ? 'eas CLI not available' : 'eas env:list failed' }),
       })
     } else if (kind === 'vercel') {
@@ -710,7 +836,7 @@ async function checkHosts(
       let names = ran && ran.code === 0 ? envNamesFrom(ran.out, kind) : []
       try {
         const toml = String(await $.fs.read(`${dir}/fly.toml`))
-        names = [...names, ...envNamesFrom(/\[env\]([\s\S]*?)(\n\[|$)/.exec(toml)?.[1] ?? '', 'dotenv')]
+        names = [...names, ...envNamesFrom(/\[env\]([\s\S]*?)(\n\[|$)/.exec(toml)?.[1] ?? '', 'fly')]
       } catch {
         // No [env] section.
       }
@@ -723,28 +849,7 @@ async function checkHosts(
     }
   }
 
-  // Local .env files: the source of last resort, used only for a side no host covers.
-  const envNames: string[] = []
-  for (const name of ['.env', '.env.local', '.env.production']) {
-    try {
-      if (await $.fs.exists(`${root}/${name}`)) envNames.push(...envNamesFrom(String(await $.fs.read(`${root}/${name}`)), 'dotenv'))
-    } catch {
-      // Unreadable: skipped.
-    }
-  }
-  if (envNames.length > 0) checks.push({ kind: 'dotenv', label: 'local .env', side: 'both', ok: true, names: [...new Set(envNames)] })
-
-  return { checks, liveUrl }
-}
-
-function presenceOf(checks: readonly HostCheck[]): EnvPresence {
-  const pick = (side: 'server' | 'client') => {
-    const host =
-      checks.find(check => check.ok && check.kind !== 'dotenv' && (check.side === side || check.side === 'both')) ??
-      checks.find(check => check.ok && check.kind === 'dotenv')
-    return host ? { source: host.label, names: new Set(host.names) } : null
-  }
-  return { server: pick('server'), client: pick('client') }
+  return { checks, liveUrl, deployed }
 }
 
 /** Runs every package's test suite, in parallel, and records each test file's result. */
@@ -773,7 +878,7 @@ async function runTests(
   return { runs, results }
 }
 
-type DetectOptions = { hosts: 'cached' | 'refresh' | 'skip'; tests: boolean }
+type DetectOptions = { hosts: HostAsk; tests: boolean }
 
 /**
  * Source files added since the last sort (by commit range when it's reachable,
@@ -792,13 +897,12 @@ async function gatherUnsorted($: $, root: string, roadmap: Roadmap, existing: Re
 }
 
 /** Files a host check reads, or that change what it would find: their times and HEAD make the key. */
-const HOST_FILES = /(^|\/)(\.env(\.[a-z]+)?|eas\.json|app\.json|app\.config\.[jt]s|railway\.(json|toml)|vercel\.json|fly\.toml|netlify\.toml)$/
+const HOST_FILES = /(^|\/)(eas\.json|app\.json|app\.config\.[jt]s|railway\.(json|toml)|vercel\.json|fly\.toml|netlify\.toml)$/
 
 async function hostsKeyOf($: $, root: string, files: readonly string[], isGit: boolean): Promise<string> {
   const head = isGit ? ((await headOf($, root)) ?? '') : ''
   const stamps: string[] = [head]
   for (const file of files.filter(one => HOST_FILES.test(one)).slice(0, 20)) stamps.push(`${file}:${await mtimeOf($, `${root}/${file}`)}`)
-  for (const file of ['.env', '.env.local', '.env.production']) stamps.push(`${file}:${await mtimeOf($, `${root}/${file}`)}`)
   return stamps.join('|')
 }
 
@@ -817,19 +921,24 @@ async function gatherLaunch(
   liveUrl: string | null,
   now: string,
   allowed: boolean,
+  keptOnce: boolean,
 ): Promise<LaunchEvidence | null> {
   const kind = launchKind(inventory.frameworks, files)
   if (kind === null) return null
   const exclude = ['--', '.', ':(exclude)*.md', ':(exclude)*.lock', ':(exclude)**/*.test.*', ':(exclude)**/*.spec.*', ':(exclude)**/__tests__/**']
   let found: Partial<Record<LaunchPattern, string[]>> | null = null
+  const unsearched: LaunchPattern[] = []
   let privacyUrl: string | null = null
   if (isGit) {
     found = {}
     for (const [pattern, regex] of Object.entries(LAUNCH_PATTERNS) as [LaunchPattern, string][]) {
-      found[pattern] = (await gitGrep($, root, ['-l', '-I', '-i', '-E', '-e', regex, ...exclude])).split('\n').filter(Boolean)
+      // A search that failed or timed out stays out: that check is unknown, not failed.
+      const listed = await gitGrep($, root, ['-l', '-I', '-i', '-E', '-e', regex, ...exclude])
+      if (listed === null) unsearched.push(pattern)
+      else found[pattern] = listed.split('\n').filter(Boolean)
     }
     // Docs count here: a policy URL often lives only in a README or a submission checklist.
-    const urls = (await gitGrep($, root, ['-h', '-o', '-I', '-E', '-e', 'https?://[A-Za-z0-9.-]+/[A-Za-z0-9./_-]*privacy[A-Za-z0-9./_-]*', '--', '.', ':(exclude)*.lock', ':(exclude)**/*.test.*', ':(exclude)**/__tests__/**'])).split('\n').filter(Boolean)
+    const urls = ((await gitGrep($, root, ['-h', '-o', '-I', '-E', '-e', 'https?://[A-Za-z0-9.-]+/[A-Za-z0-9./_-]*privacy[A-Za-z0-9./_-]*', '--', '.', ':(exclude)*.lock', ':(exclude)**/*.test.*', ':(exclude)**/__tests__/**'])) ?? '').split('\n').filter(Boolean)
     privacyUrl = privacyUrlOf(urls)
   }
 
@@ -850,28 +959,35 @@ async function gatherLaunch(
       const response = await $.http.fetch(privacy.url)
       privacy = { url: privacy.url, status: response.status, checked_at: now }
     } catch {
-      privacy = { url: privacy.url, status: 0, checked_at: now }
+      // No answer says nothing about the page: unknown.
+      privacy = { url: privacy.url, status: null, checked_at: now }
     }
   }
 
   let deviceBuild = previous?.device_build ?? null
+  let storeCommit = previous?.store_commit ?? null
   const easDir = files.find(file => /(^|\/)eas\.json$/.test(file))
   if (kind === 'app' && easDir !== undefined && allowed && (due || previous === null)) {
     const dir = easDir.includes('/') ? `${root}/${easDir.slice(0, easDir.lastIndexOf('/'))}` : root
     const ran = await run($, ['eas', 'build:list', '--json', '--non-interactive', '--limit', '20'], dir, 60_000)
-    deviceBuild = ran && ran.code === 0 ? deviceBuildOf(ran.out.slice(ran.out.indexOf('['))) : (previous?.device_build ?? null)
+    if (ran && ran.code === 0) {
+      const json = ran.out.slice(ran.out.indexOf('['))
+      deviceBuild = deviceBuildOf(json)
+      storeCommit = storeCommitOf(json)
+    }
   }
 
   const checks = launchChecks({
     kind,
     found,
+    unsearched,
     files,
     appConfig,
     privacy: { url: privacy?.url ?? null, status: privacy?.status ?? null },
     deviceBuild,
     liveUrl,
   })
-  return { kind, checks, privacy, device_build: deviceBuild }
+  return { kind, checks, privacy, device_build: deviceBuild, store_commit: allowed || keptOnce ? storeCommit : null }
 }
 
 /**
@@ -889,86 +1005,84 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
   const fileSet = new Set(files)
 
   const related = [...new Set(roadmap.features.flatMap(feature => feature.related_files))]
-  const existing = related.filter(path => fileSet.has(path))
-  const sources = existing.filter(path => isSourceFile(path) && !isTestFile(path))
+  const sources = related.filter(path => fileSet.has(path) && isSourceFile(path) && !isTestFile(path))
+  const testFiles = files.filter(path => isTestFile(path) && isSourceFile(path))
 
-  let references: Map<string, Set<string>> | null = null
-  let testImports: Map<string, Set<string>> | null = null
-  let markers = new Map<string, number>()
+  // One read of every code, template and config file; wiring, test imports, routes, pages and markers come from it.
+  const scanStarted = Date.now()
+  const scan = await readTexts($, root, files, isGit)
+  const { references, testImports, markers, uiStyle, pages, pageRoutes, routes, routeTests } = scanFacts(files, scan.texts, inventory.frameworks, related)
+  const scanMs = Date.now() - scanStarted
+
   let activity = new Map<string, { last: string; recent: number }>()
   let commits = new Map<string, { hash: string; at: string; subject: string }[]>()
   let uncommitted = new Set<string>()
+  let merges: Merge[] = []
+  let deployRefs = ''
   if (isGit) {
-    const names = [...new Set(sources.flatMap(referenceNames))].slice(0, 400)
-    references =
-      names.length === 0
-        ? new Map()
-        : parseGrepMatches(await gitGrep($, root, ['-I', '-o', '-w', '-F', ...names.flatMap(name => ['-e', name]), '--', '.', ':(exclude)*.md', ':(exclude)*.lock']))
-    // Which tests import each feature file by path: one more grep, over the test files only.
-    const testFiles = files.filter(path => isTestFile(path) && isSourceFile(path))
-    const counts = sourceNameCounts(files)
-    const imported = [...new Set(sources.flatMap(path => importNames(path, counts)))].slice(0, 400)
-    testImports =
-      imported.length === 0 || testFiles.length === 0 || testFiles.length > 3000
-        ? new Map()
-        : parseImportMatches(
-            await gitGrep($, root, ['-I', '-o', '-F', ...imported.flatMap(name => importPatterns(name).flatMap(pattern => ['-e', pattern])), '--', ...testFiles]),
-            imported,
-          )
-    markers = existing.length === 0 ? new Map() : parseGrepCounts(await gitGrep($, root, ['-I', '-c', '-E', '-e', MARKER_PATTERN, '--', ...existing]))
     const log = (await git($, root, ['log', '--since=90.days.ago', '--no-merges', '--name-only', LOG_FORMAT], 30_000)) ?? ''
     activity = parseGitActivity(log, nowMs)
     commits = parseGitCommits(log)
     uncommitted = parseStatus((await git($, root, ['status', '--porcelain', '--untracked-files=all'])) ?? '')
+    merges = parseMerges((await git($, root, ['log', '--first-parent', '--since=8.days.ago', '-m', '--name-only', LOG_FORMAT, 'HEAD'], 30_000)) ?? '')
+    deployRefs = (await git($, root, ['for-each-ref', '--format=%(refname)%09%(objectname)%09%(creatordate:iso-strict)', 'refs/heads', 'refs/remotes', 'refs/tags'])) ?? ''
   }
 
   // Env reads per source file; names an env schema declares optional count as optional.
   const schemaOptional = new Set<string>()
   for (const path of files.filter(file => ENV_MODULE.test(file)).slice(0, 6)) {
     try {
-      for (const name of optionalInSchema(String(await $.fs.read(`${root}/${path}`)))) schemaOptional.add(name)
+      for (const name of optionalInSchema(scan.texts.get(path) ?? String(await $.fs.read(`${root}/${path}`)))) schemaOptional.add(name)
     } catch {
       // Unreadable: no optional names from it.
     }
   }
   const reads = new Map<string, EnvRead[]>()
-  for (const path of sources.slice(0, 200)) {
+  for (const path of sources.slice(0, 400)) {
     try {
-      const found = envReads(String(await $.fs.read(`${root}/${path}`)))
+      const found = envReads(scan.texts.get(path) ?? String(await $.fs.read(`${root}/${path}`)))
       reads.set(path, found.map(one => (schemaOptional.has(one.name) ? { ...one, optional: true } : one)))
     } catch {
       // Unreadable: no env reads from it.
     }
   }
 
-  // Hosts: asked on a refresh, after HOST_TTL_MS, or when HEAD or a host or env file changed; otherwise the last answer stands.
-  let hosts = previous?.hosts ?? []
+  // Hosts: with the switch on, asked on a refresh, after HOST_TTL_MS, or when HEAD or a host or env file changed; otherwise the last answer stands.
+  // With it off, only Check once asks. Its answer stands until the next one; any other answer is dropped.
+  let hosts = withoutLocalEnv(previous?.hosts ?? [])
   let hostsCheckedAt = previous?.hosts_checked_at ?? null
   let live = previous?.live ?? null
+  let hostDeploy = previous?.host_deploy ?? null
   const hostsKey = await hostsKeyOf($, root, files, isGit)
   const isStale = hostsCheckedAt === null || nowMs - Date.parse(hostsCheckedAt) > HOST_TTL_MS || hostsKey !== (previous?.hosts_key ?? null)
-  const allowed = await hostsOn($, root)
-  const hostsDue = allowed && (options.hosts === 'refresh' || (options.hosts === 'cached' && isStale))
+  const once = options.hosts === 'once'
+  const allowed = once || (await hostsOn($, root))
+  const hostsDue = asksHosts(options.hosts, allowed, isStale)
   if (hostsDue) {
     const checked = await checkHosts($, root, files, inventory, manifests)
     hosts = checked.checks
     hostsCheckedAt = now
+    hostDeploy = checked.deployed
     if (checked.liveUrl) {
-      const hasHealth = (await gitGrep($, root, ['-I', '-l', '-F', '-e', "'/health'", '-e', '"/health"', '--', '.'])).trim() !== ''
+      const hasHealth = ((await gitGrep($, root, ['-I', '-l', '-F', '-e', "'/health'", '-e', '"/health"', '--', '.'])) ?? '').trim() !== ''
       const url = `${checked.liveUrl}${hasHealth ? '/health' : ''}`
       try {
         const response = await $.http.fetch(url)
-        live = { url, ok: response.status < 500, status: response.status, checked_at: now }
-      } catch {
-        live = { url, ok: false, status: 0, checked_at: now }
+        // The same answer may say which commit is running: that's what's live.
+        live = { url, ok: response.status < 500, status: response.status, checked_at: now, commit: reportedCommit(String(response.text ?? '')) }
+      } catch (error) {
+        // A refused connection is a dead server. Anything else with no answer may be this machine: unknown.
+        live = isConnectionRefused(error) ? { url, ok: false, status: null, refused: true, checked_at: now, commit: null } : { url, ok: null, status: null, checked_at: now, commit: null }
       }
     }
   }
-  if (!allowed) {
+  const keptOnce = !allowed && previous?.hosts_once === true
+  if (!allowed && !keptOnce) {
     hosts = []
     live = null
+    hostDeploy = null
   }
-  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now, allowed)
+  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now, allowed, keptOnce)
   const unsorted = isGit ? await gatherUnsorted($, root, roadmap, fileSet) : []
 
   let testRuns = previous?.test_runs ?? []
@@ -978,30 +1092,57 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
     testRuns = ran.runs
     testResults = ran.results
   }
+  const suite = suiteOf(testRuns, testResults)
+
+  const coverage = await readCoverage($, root, inventory.testCommands, fileSet)
+
+  // What's deployed: the running app's own word, else the deploy host's, else a deploy branch or tag, else the newest store build.
+  const marker = deployRefOf(deployRefs)
+  const deployed =
+    (live?.commit ? { commit: live.commit, source: 'the deployed app' } : null) ??
+    (hostDeploy ? { commit: hostDeploy.commit, source: hostDeploy.source } : null) ??
+    (marker ? { commit: marker.commit, source: marker.ref.replace(/^refs\/(heads|remotes|tags)\//, '') } : null) ??
+    (launch?.store_commit ? { commit: launch.store_commit, source: 'the newest store build' } : null)
+  let deploy: { commit: string; source: string; changed: Set<string> } | null = null
+  if (deployed && isGit) {
+    const changed = await git($, root, ['diff', '--name-only', deployed.commit, 'HEAD'])
+    if (changed !== null) deploy = { ...deployed, changed: new Set(changed.split('\n').filter(Boolean)) }
+  }
 
   const facts = {
     frameworks: inventory.frameworks,
     files: fileSet,
     references,
+    referencesComplete: scan.complete,
     testImports,
+    routeTests,
+    pages,
     markers,
     activity,
     commits,
     uncommitted,
     envReads: reads,
-    env: presenceOf(hosts),
+    env: envPresenceOf(hosts),
     testResults,
+    suite,
+    coverage,
+    deploy,
   }
   const features: Evidence = {}
   for (const feature of roadmap.features) {
     if (feature.related_files.length > 0) features[feature.id] = featureEvidence(feature.related_files, facts, feature.needs_config)
   }
+  const mapped = new Set(Object.values(features).flatMap(ev => ev.tests))
+  const unmapped = testFiles.filter(test => !mapped.has(test))
+  const owners = (path: string) =>
+    roadmap.features.filter(feature => feature.related_files.some(file => path === file || path.startsWith(`${file.replace(/\/$/, '')}/`))).map(feature => feature.id)
 
   const evidence: EvidenceFile = {
     version: 2,
     checked_at: now,
     hosts_checked_at: hostsCheckedAt,
     hosts_key: hostsDue ? hostsKey : (previous?.hosts_key ?? null),
+    hosts_once: once || keptOnce,
     launch,
     unsorted,
     project: {
@@ -1011,12 +1152,22 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
       test_commands: inventory.testCommands,
       tests: inventory.tests,
       file_count: inventory.fileCount,
-      screens: inventory.screens.length,
+      screens: screenCount(inventory.screens, pages, pageRoutes),
       routes: inventory.routes.length,
       git: isGit,
+      ui_style: uiStyle,
+      pages: pages.size,
+      registered_routes: routes.length,
+      unmapped_tests: unmapped.length,
+      unmapped_sample: unmapped.slice(0, 30),
+      scan: { files: scan.texts.size, complete: scan.complete, ms: scanMs },
+      coverage: coverage ? { paths: coverage.paths, at: new Date(coverage.atMs).toISOString() } : null,
+      deploy: deploy ? { source: deploy.source, commit: deploy.commit.slice(0, 7), changed: deploy.changed.size } : null,
     },
     hosts,
     live,
+    host_deploy: hostDeploy,
+    merged: merges.map(merge => ({ at: merge.at, pr: merge.pr, subject: merge.subject, features: [...new Set(merge.files.flatMap(owners))] })),
     test_runs: testRuns,
     test_results: testResults,
     features,
@@ -1035,8 +1186,9 @@ let detectAgain: DetectOptions | null = null
 /** Re-reads the evidence and applies it to the roadmap; returns a short account of what changed. */
 function detect($: $, options: DetectOptions): Promise<string> {
   if (detecting) {
+    const asked = [detectAgain?.hosts, options.hosts]
     detectAgain = {
-      hosts: detectAgain?.hosts === 'refresh' || options.hosts === 'refresh' ? 'refresh' : options.hosts,
+      hosts: asked.includes('once') ? 'once' : asked.includes('refresh') ? 'refresh' : options.hosts,
       tests: (detectAgain?.tests ?? false) || options.tests,
     }
     return detecting
@@ -1078,11 +1230,22 @@ function describeDetection(evidence: EvidenceFile, changes: readonly Change[]): 
       ? `${change.title}: ${change.from} → ${change.to}`
       : `${change.title}: ${change.field.replace('_state', '')} ${change.from} → ${change.to}`,
   )
+  const project = evidence.project
+  const scan = project.scan
   return [
     `Checked ${Object.keys(evidence.features).length} features.`,
-    hosts.length > 0 ? `Config: ${hosts.join('; ')}.` : 'Config: not checked (host checks are off for this project, or no deploy host was found).',
+    scan ? `Wiring: read ${scan.files} files in ${scan.ms}ms${scan.complete ? '' : '; not every file could be read, so a file referenced nowhere shows as unknown'}.` : '',
+    project.ui_style ? `UI: ${UI_STYLE_WORDS[project.ui_style]}; ${project.screens} screens.` : '',
+    hosts.length > 0
+      ? `Config${evidence.hosts_once ? ` (from Check once, ${evidence.hosts_checked_at})` : ''}: ${hosts.join('; ')}.`
+      : 'Config: not checked (host checks are off for this project, or no deploy host was found).',
     runs.length > 0 ? `Tests: ${runs.join('; ')}.` : '',
-    evidence.live ? `Live: ${evidence.live.url} answered ${evidence.live.status || 'nothing'}.` : '',
+    project.unmapped_tests !== undefined
+      ? `Test files: ${project.tests.length}, ${project.unmapped_tests} mapped to no feature${project.unmapped_tests > 0 ? ' (they test files no feature claims, or reach code no route mapping found)' : ''}.`
+      : '',
+    project.coverage ? `Coverage: ${project.coverage.paths.join(', ')}.` : '',
+    project.deploy ? `Deployed: ${project.deploy.commit}, read from ${project.deploy.source}; ${project.deploy.changed} files changed since.` : '',
+    evidence.live ? `Live: ${evidence.live.url} ${evidence.live.status ? `answered ${evidence.live.status}` : evidence.live.refused ? 'refused the connection' : 'unknown (no answer)'}.` : '',
     evidence.launch
       ? `Launch: ${evidence.launch.checks.filter(check => check.state === 'ok').length}/${evidence.launch.checks.length} checks pass${evidence.launch.checks.some(check => check.state === 'fail') ? `; failing: ${evidence.launch.checks.filter(check => check.state === 'fail').map(check => check.label).join(', ')}` : ''}.`
       : '',
@@ -1101,6 +1264,13 @@ async function setupFacts($: $, place: Place): Promise<string> {
   const { files, git: isGit } = await listFiles($, root)
   const inventory = inventoryOf(files, await readManifests($, root, files))
   const nowMs = await $.clock.now()
+  // A server that renders its own pages: they're found by what the files contain, not where they sit.
+  const uiStyle = uiStyleOf(inventory.frameworks, files)
+  const serverTexts = uiStyle === 'server' ? (await readTexts($, root, files.filter(file => isSourceFile(file) && !isTestFile(file)), isGit)).texts : new Map<string, string>()
+  const pages = [...serverTexts].filter(([path, text]) => rendersPage(path, text)).map(([path]) => path)
+  // A server's screens are its page routes; its page files are where to read them.
+  const pageRoutes = pageRoutesOf(files, serverTexts)
+  const screens = pageRoutes.length > 0 ? pageRoutes : [...new Set([...inventory.screens, ...pages])]
 
   const dirs = new Map<string, number>()
   for (const file of files) {
@@ -1118,7 +1288,7 @@ async function setupFacts($: $, place: Place): Promise<string> {
       // Unreadable: skipped.
     }
   }
-  const envLines = await gitGrep($, root, ['-I', '-h', '-o', '-E', '-e', '(env|ENV|environ|getenv|Getenv|env::var|System\\.getenv)[^A-Za-z0-9_]{0,4}[A-Z][A-Z0-9_]{2,}', '--', '.', ':(exclude)*.md'])
+  const envLines = (await gitGrep($, root, ['-I', '-h', '-o', '-E', '-e', '(env|ENV|environ|getenv|Getenv|env::var|System\\.getenv)[^A-Za-z0-9_]{0,4}[A-Z][A-Z0-9_]{2,}', '--', '.', ':(exclude)*.md'])) ?? ''
   for (const line of envLines.split('\n')) {
     const name = /([A-Z][A-Z0-9_]{2,})$/.exec(line)?.[1]
     if (name) envNames.add(name)
@@ -1142,7 +1312,7 @@ async function setupFacts($: $, place: Place): Promise<string> {
     `Stack: ${[...inventory.languages, ...inventory.frameworks].join(', ') || 'unknown'}.`,
     `Hosts: ${inventory.hosts.join(', ') || 'none detected'}. Test commands: ${inventory.testCommands.map(command => `${command.argv.join(' ')} (in ${command.dir || '.'})`).join('; ') || 'none'}.`,
     `Folders (files): ${[...dirs].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([dir, count]) => `${dir} ${count}`).join(', ')}.`,
-    `Screens (${inventory.screens.length}):\n${bullets(inventory.screens, 80)}`,
+    `UI: ${UI_STYLE_WORDS[uiStyle]}. Screens (${screens.length}):\n${bullets(screens, 80)}`,
     `Server routes (${inventory.routes.length}):\n${bullets(inventory.routes, 60)}`,
     `Tests: ${inventory.tests.length} files.`,
     `Env vars the code reads: ${[...envNames].sort().slice(0, 80).join(', ') || 'none'}.`,
@@ -1289,7 +1459,14 @@ function refusal(errors: readonly string[]): string {
 
 const progressLine = (roadmap: Roadmap) => {
   const p = progress(roadmap)
-  return `${p.overall ?? 0}% overall (UI ${p.ui ?? '-'}%, functional ${p.functional ?? '-'}%)`
+  return `${p.builtCount} of ${p.planned} features built (${p.built === null ? 'unknown' : `${p.built}%`})`
+}
+
+const UI_STYLE_WORDS: Record<UiStyle, string> = {
+  components: 'components (screens are component files)',
+  native: 'native screens',
+  server: 'server-rendered pages (route handlers and templates that return HTML)',
+  none: 'no screens found',
 }
 
 async function fileEdited($: $, place: Place, path: string) {
@@ -1372,7 +1549,7 @@ async function loadProjects($: $, here: string): Promise<ProjectSummary[]> {
         roadmap: loaded.roadmap,
         exists: loaded.exists,
         evidence: evidence?.features ?? {},
-        live: evidence?.live ? evidence.live.ok : null,
+        live: evidence?.live ? (liveAnswer(evidence.live) ?? 'unknown') : null,
       },
       nowMs,
     )
@@ -1727,8 +1904,11 @@ export const register: Register = (on, options) => {
       const nowMs = Date.parse(drafted.now)
       const derived: Roadmap = {
         ...drafted.roadmap,
+        // A status Claude gave is recorded: detection keeps it unless the evidence disproves it.
         features: drafted.roadmap.features.map(feature =>
-          drafted.given.has(feature.id) ? feature : { ...feature, status: initialStatus(evidence.features[feature.id], nowMs) },
+          drafted.given.has(feature.id)
+            ? { ...feature, status_by: 'claude' as const }
+            : { ...feature, status: initialStatus(evidence.features[feature.id], nowMs), status_by: 'detected' as const },
         ),
       }
       const roadmap: Roadmap = { ...reconcile(derived, evidence.features, drafted.now).roadmap, recent_changes: [] }
@@ -1862,10 +2042,23 @@ export const register: Register = (on, options) => {
         evidence: evidence?.features ?? {},
         capabilities: {
           tests: (evidence?.project.test_commands.length ?? 0) > 0,
-          hosts: (evidence?.hosts ?? []).some(host => host.kind !== 'dotenv'),
+          hosts: withoutLocalEnv(evidence?.hosts ?? []).length > 0,
           git: evidence?.project.git ?? true,
         },
         live: evidence?.live ?? null,
+        project: {
+          // No screen recognised and every UI feature still at none: UI is unknown, not 0%.
+          uiKnown:
+            (evidence?.project.screens ?? 0) > 0 ||
+            (loaded.roadmap?.features.some(feature => feature.kind === 'ui' && feature.ui_state !== 'none') ?? false) ||
+            !(loaded.roadmap?.features.some(feature => feature.kind === 'ui') ?? false),
+          screens: evidence?.project.screens ?? null,
+          tests: evidence?.project.tests.length ?? 0,
+          unmappedTests: evidence?.project.unmapped_tests ?? 0,
+          deployable: (evidence?.project.hosts.length ?? 0) > 0 || (evidence?.project.deploy ?? null) !== null,
+          deploy: evidence?.project.deploy ?? null,
+        },
+        merged: evidence?.merged ?? [],
         launch: evidence?.launch ? { kind: evidence.launch.kind, checks: evidence.launch.checks } : null,
         checkedAt: evidence?.checked_at ?? null,
         checking: await read($, checking),
@@ -1879,7 +2072,11 @@ export const register: Register = (on, options) => {
         columns: e.props.bodyColumns,
         captureKey: `capture:${await read($, captureGeneration)}`,
         setupRequested: await read($, setupRequested),
-        hostChecks: { answered: await hostsAnswered($, place.root), on: await hostsOn($, place.root) },
+        hostChecks: {
+          answered: await hostsAnswered($, place.root),
+          on: await hostsOn($, place.root),
+          onceAt: evidence?.hosts_once ? evidence.hosts_checked_at : null,
+        },
         view,
         projects,
         unsorted: evidence?.unsorted ?? [],
@@ -1902,6 +2099,7 @@ export const register: Register = (on, options) => {
         setup: () => quietly(requestSetup($).then(() => startTurn($, SETUP_PROMPT))),
         sort: () => quietly(startTurn($, SORT_PROMPT)),
         setHosts: allow => quietly(setHosts($, allow)),
+        checkHostsOnce: () => quietly(detect($, { hosts: 'once', tests: false })),
       },
     )
   }).catch(($, e) => {

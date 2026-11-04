@@ -12,9 +12,18 @@ export const PRESENTATION = { isFullscreen: false, columns: 100 }
 
 type Stored = { text: string; mtimeMs: number }
 
-/** A project on disk in memory, no git, and a record of the prompts the mod submits. */
-export function world(on: On) {
+/** A repository for the world: its files, and what its git and test runner answer (null: as if not installed). */
+export type Repo = {
+  files: Record<string, string>
+  run: (argv: readonly string[]) => { exitCode: number; stdout: string } | null
+  /** Whether a URL answers: false is a request that never gets one (offline, DNS, a timeout); 'refused' fails the way the real host words it. */
+  reachable?: (url: string) => boolean | 'refused'
+}
+
+/** A project on disk in memory, no git unless a repo is given, and a record of the prompts the mod submits. */
+export function world(on: On, repo: Repo | null = null) {
   const files = new Map<string, Stored>()
+  for (const [path, text] of Object.entries(repo?.files ?? {})) files.set(`${ROOT}/${path}`, { text, mtimeMs: 0 })
   /** Set by breakDisk(): every file call fails, as a full or unreadable disk would. */
   let broken = false
   const disk = () => {
@@ -31,6 +40,8 @@ export function world(on: On) {
   /** Every process the mod started (argv), and every URL it fetched. */
   const ran: string[][] = []
   const fetched: string[] = []
+  /** Every path the mod asked the disk about: read, stat or exists. */
+  const touched: string[] = []
   /** The project's top-level files, as listing it shows them. */
   const listing = ['PLAN.md']
   const toasts: string[] = []
@@ -45,18 +56,26 @@ export function world(on: On) {
   on('session.messages', () => ({ value: [{ role: 'user', text: 'Wire up the login screen', toolUses: [] }] }))
   on('process.run', ($, e) => {
     ran.push([...e.argv])
+    const answer = repo?.run(e.argv)
+    if (answer) return { value: { ...answer, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', ($, e) => {
-    fetched.push(String((e as { url?: unknown }).url ?? e))
+    const url = String((e as { url?: unknown }).url ?? e)
+    fetched.push(url)
+    const reach = repo?.reachable?.(url)
+    if (reach === 'refused') return { deny: 'ECONNREFUSED: ECONNREFUSED: Unable to connect. Is the computer able to access the url?' }
+    if (reach === false) return { deny: `unreachable ${url}` }
     return { value: { status: 200 } as never }
   })
   on('fs.exists', ($, e) => {
     disk()
+    touched.push(e.path)
     return { value: files.has(e.path) || e.path.includes('/prompts/') }
   })
   on('fs.read', ($, e) => {
     disk()
+    touched.push(e.path)
     // Each prompt file reads as its own name, so a test can tell which one a step used.
     if (e.path.includes('/prompts/')) return { value: `prompt:${e.path.split('/').pop()?.replace('.md', '')}` }
     const stored = files.get(e.path)
@@ -69,6 +88,7 @@ export function world(on: On) {
   })
   on('fs.stat', ($, e) => {
     disk()
+    touched.push(e.path)
     const stored = files.get(e.path)
     return stored
       ? { value: { kind: 'file' as const, size: stored.text.length, mtimeMs: stored.mtimeMs, isLink: false } }
@@ -117,6 +137,7 @@ export function world(on: On) {
     opened,
     ran,
     fetched,
+    touched,
     listing,
     breakDisk() {
       broken = true

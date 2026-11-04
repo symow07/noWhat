@@ -2,8 +2,8 @@
 // typing a status. Pure. Every change it makes is logged with source "detected",
 // and it only moves a state on concrete evidence: unknown never downgrades.
 
-import type { FeatureEvidence } from './detect'
-import { type Change, type ChangeField, type Feature, type Roadmap, type Status, STALE_DAYS, keepChanges } from './schema'
+import { type FeatureEvidence, type FileEvidence, LOCAL_ENV } from './detect'
+import { type Change, type ChangeField, type Feature, type Roadmap, type Status, type Verification, STALE_DAYS, keepChanges } from './schema'
 
 /** Files changed within this many days mean planned work has started. */
 export const STARTED_DAYS = 3
@@ -12,28 +12,53 @@ export type Evidence = Record<string, FeatureEvidence>
 
 const DAY = 86_400_000
 
+/** A source file of the feature's: evidence written before `code` existed said so by being wired or not. */
+const isCode = (file: FileEvidence) => file.code ?? file.wired !== null
+
 /** The feature has code: a source file of its exists. */
-export const hasCode = (ev: FeatureEvidence) => ev.files.some(file => file.exists && file.wired !== null)
+export const hasCode = (ev: FeatureEvidence) => ev.files.some(file => file.exists && isCode(file))
 
 const changedWithin = (ev: FeatureEvidence, nowMs: number, days: number) =>
   ev.uncommitted || (ev.last_change !== null && nowMs - Date.parse(ev.last_change) < days * DAY)
 
-/** Proven working: every source file exists and is wired, its tests pass, and nothing it needs is missing. */
-export function isHealthy(ev: FeatureEvidence): boolean {
-  const code = ev.files.filter(file => file.wired !== null)
-  return code.length > 0 && code.every(file => file.exists && file.wired === true) && ev.tests_status === 'pass' && ev.env_missing.length === 0
+/**
+ * How the evidence proves the feature works, strongest first: its own tests
+ * pass; the suite passes and a coverage report saw its code run; the suite
+ * passes and none of its tests map to it (built, tests not mapped). Null when
+ * nothing proves it. A signal that couldn't be read (wiring nobody could
+ * check, tests that never ran) never counts against it: only a file seen
+ * unreferenced, a failing test or a missing key does.
+ */
+export function provenBy(ev: FeatureEvidence): Extract<Verification, 'tests' | 'coverage' | 'suite'> | null {
+  const code = ev.files.filter(isCode)
+  if (code.length === 0 || code.some(file => !file.exists || file.wired === false) || ev.env_missing.length > 0) return null
+  if (ev.tests_status === 'fail') return null
+  if (ev.tests_status === 'pass') return 'tests'
+  if (ev.suite !== 'pass') return null
+  return (ev.coverage ?? 0) > 0 ? 'coverage' : 'suite'
 }
+
+/** Proven working by its own tests. */
+export const isHealthy = (ev: FeatureEvidence) => provenBy(ev) === 'tests'
 
 /**
  * The status a feature starts with when nobody gave one: no code is not
- * started; healthy is done; code moving this week is in progress; older code
- * nobody proved is done, and shows as unverified until something proves it.
+ * started; proven is done; code moving this week is in progress; older code
+ * nobody proved is done, and shows as unconfirmed until something proves it.
  */
 export function initialStatus(ev: FeatureEvidence | undefined, nowMs: number): Status {
   if (!ev || !hasCode(ev)) return 'not_started'
-  if (isHealthy(ev)) return 'done'
+  if (provenBy(ev) !== null) return 'done'
   if (changedWithin(ev, nowMs, STALE_DAYS)) return 'in_progress'
   return 'done'
+}
+
+/** Whether Claude or a person set this status: detection then keeps it. */
+function isRecorded(roadmap: Roadmap, feature: Feature): boolean {
+  if (feature.status_by !== null) return feature.status_by === 'claude'
+  // Older files: the latest logged change of its status says who.
+  const last = roadmap.recent_changes.find(change => change.id === feature.id && change.field === 'status')
+  return last !== undefined && last.source !== 'detected'
 }
 
 /** The signals the dashboard shows beside a feature, worst first. */
@@ -53,15 +78,18 @@ export function signalsOf(ev: FeatureEvidence | undefined): string[] {
 /**
  * Applies evidence to the roadmap. The rules, in order:
  * 1. UI: a reachable screen makes a feature at least "designed". Polish is never taken away.
- * 2. Functional: code makes it at least "partial"; healthy makes it "working" (verified by
- *    tests); failing tests, or a file nothing references any more, take "working" back.
- *    All its files gone takes it to "none".
+ * 2. Functional: code makes it at least "partial"; proven (provenBy) makes it "working",
+ *    verified by tests, coverage or the suite; failing tests, or a file seen unreferenced,
+ *    take "working" back. All its files gone takes it to "none".
  * 3. Started: a not-started or queued feature whose own files (none it shares with another
- *    feature) changed in STARTED_DAYS days is in progress.
+ *    feature) changed in STARTED_DAYS days is in progress. Finished: an in-progress feature
+ *    that is proven and has no uncommitted edits is done, unless Claude set it in progress.
  * 4. Config: required env vars missing on the deploy target block it on the user; when they
- *    appear, the block detection made lifts and the status it had comes back.
+ *    appear, the block detection made lifts and the status it had comes back. A block an
+ *    earlier version read off the local .env always lifts: that file is no evidence.
  * 5. Regression: "working" taken away marks the feature as broke, with why; working again clears it.
  * A pinned feature is left exactly as the person set it, and a parked one keeps its status.
+ * Done is never taken back: recorded done with nothing proving it shows as unconfirmed.
  * A feature whose files all belong to other features too is left alone: their
  * evidence can't tell it apart (a planned chart on a shared home screen isn't
  * proven by the home screen's tests).
@@ -73,7 +101,9 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
   for (const feature of roadmap.features) for (const path of feature.related_files) owners.set(path, (owners.get(path) ?? 0) + 1)
   const isOwn = (path: string) => owners.get(path) === 1
 
-  const features = roadmap.features.map(original => {
+  const features = roadmap.features.map(stored => {
+    // First, whatever its files: nothing below would lift this for a feature whose files are all shared.
+    const original = liftedFromLocalEnv(stored, now, changes)
     const ev = evidence[original.id]
     if (!ev || original.related_files.length === 0 || original.pinned) return original
     if (!original.related_files.some(isOwn)) return original
@@ -89,10 +119,13 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
     const setStatus = (to: Status) => {
       log('status', feature.status, to)
       feature.status = to
+      feature.status_by = 'detected'
     }
     const code = hasCode(ev)
+    const proof = provenBy(ev)
 
-    if (feature.kind === 'ui' && feature.ui_state === 'none' && ev.files.some(file => file.screen && file.wired === true)) {
+    // A screen that exists and wasn't seen unreferenced: unknown wiring doesn't hide it.
+    if (feature.kind === 'ui' && feature.ui_state === 'none' && ev.files.some(file => file.screen && file.exists && file.wired !== false)) {
       log('ui_state', 'none', 'designed')
       feature.ui_state = 'designed'
     }
@@ -106,10 +139,14 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
     } else {
       if (feature.functional_state === 'none') setFunctional('partial', null)
       if (ev.tests_status === 'fail' && feature.functional_state === 'working') broke('tests fail')
-      else if (isHealthy(ev) && feature.functional_state !== 'working') {
-        setFunctional('working', 'tests')
+      else if (proof !== null && feature.functional_state !== 'working') {
+        setFunctional('working', proof)
         feature.regressed = null
-      } else if (feature.functional_state === 'working' && feature.verified_by === 'tests' && ev.files.some(file => file.exists && file.wired === false)) {
+      } else if (
+        feature.functional_state === 'working' &&
+        (feature.verified_by === 'tests' || feature.verified_by === 'coverage' || feature.verified_by === 'suite') &&
+        ev.files.some(file => file.exists && file.wired === false)
+      ) {
         broke('a file is no longer wired in')
       }
     }
@@ -128,8 +165,11 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
         setStatus('blocked')
         feature.blocked_on = 'you'
         feature.blocker_reason = reason
-        feature.auto_blocked = { from }
-      } else if (feature.auto_blocked) feature.blocker_reason = reason
+        feature.auto_blocked = { from, source: ev.env_source }
+      } else if (feature.auto_blocked) {
+        feature.blocker_reason = reason
+        feature.auto_blocked = { ...feature.auto_blocked, source: ev.env_source }
+      }
     } else if (feature.auto_blocked && (ev.env_source !== null || ev.env_required.length === 0)) {
       const back = feature.auto_blocked.from
       setStatus(back)
@@ -138,14 +178,31 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
       feature.auto_blocked = null
     }
 
+    // Proven and nothing in flight: finished, unless Claude said it's still in progress.
+    if (!holdsStatus && feature.status === 'in_progress' && proof !== null && !ev.uncommitted && !isRecorded(roadmap, original)) setStatus('done')
+
     if (changes.some(change => change.id === feature.id)) feature.progress_at = now
     return feature
   })
 
   if (changes.length === 0) return { roadmap, changes }
 
+
   return {
     roadmap: { ...roadmap, features, recent_changes: keepChanges([...[...changes].reverse(), ...roadmap.recent_changes], now) },
     changes,
   }
+}
+
+/** The feature without a block read off the local .env; pinned ones are left as the person set them. */
+function liftedFromLocalEnv(feature: Feature, now: string, changes: Change[]): Feature {
+  if (!feature.auto_blocked || feature.pinned || blockedFrom(feature) !== LOCAL_ENV) return feature
+  const to = feature.auto_blocked.from
+  changes.push({ at: now, id: feature.id, title: feature.title, field: 'status', from: feature.status, to, source: 'detected' })
+  return { ...feature, status: to, status_by: 'detected', blocked_on: null, blocker_reason: null, auto_blocked: null, progress_at: now }
+}
+
+/** Where a detected block's missing names were read: recorded since 0.4, read off its reason before. */
+function blockedFrom(feature: Feature): string | null {
+  return feature.auto_blocked?.source ?? /^Missing in (.+?): /.exec(feature.blocker_reason ?? '')?.[1] ?? null
 }

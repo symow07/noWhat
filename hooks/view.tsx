@@ -11,7 +11,22 @@
 import type { Elements } from 'claude-code'
 
 import type { FeatureEvidence } from './detect'
-import { type Alert, STATUS_WORDS, alertsOf, catchUp, healthOf, rabbitHoles, scopeWeek, shortDate, unblocks, waitingOn, weeklySummary } from './insights'
+import {
+  type Alert,
+  type MergedWork,
+  STATUS_WORDS,
+  alertsOf,
+  catchUp,
+  healthOf,
+  liveOf,
+  mergedLine,
+  rabbitHoles,
+  scopeWeek,
+  shortDate,
+  unblocks,
+  waitingOn,
+  weeklySummary,
+} from './insights'
 import { type LaunchCheck, type LaunchKind, launchTitle } from './launch'
 import { type ProjectSummary } from './portfolio'
 import { signalsOf } from './reconcile'
@@ -35,7 +50,21 @@ export type PaneData = {
   evidence: Readonly<Record<string, FeatureEvidence>>
   /** What this project lets detection see: a test command, a deploy host, git. */
   capabilities: { tests: boolean; hosts: boolean; git: boolean }
-  live: { url: string; ok: boolean; status: number } | null
+  live: { url: string; ok: boolean | null; status: number | null; refused?: boolean } | null
+  /** What the project-wide evidence says: how screens are drawn, the tests that map nowhere, what's deployed. */
+  project: {
+    /** No screen could be recognised although features have UI: UI progress is unknown, not 0%. */
+    uiKnown: boolean
+    /** Null with no evidence to count them from. */
+    screens: number | null
+    tests: number
+    unmappedTests: number
+    /** A deploy host is configured, so "live" means something here. */
+    deployable: boolean
+    deploy: { source: string; commit: string } | null
+  }
+  /** Pull requests merged on the main line this week, with the features they touched. */
+  merged: readonly MergedWork[]
   /** The launch checklist, when the project is a store or web app. */
   launch: { kind: LaunchKind; checks: LaunchCheck[] } | null
   checkedAt: string | null
@@ -56,7 +85,8 @@ export type PaneData = {
   /** The person ran /nowhat (or pressed Set up) here in this session. */
   setupRequested: boolean
   /** Host checks for this project: whether the person answered, and whether they're on. */
-  hostChecks: { answered: boolean; on: boolean }
+  /** onceAt: when Check once last asked, while its answer stands with the switch off. */
+  hostChecks: { answered: boolean; on: boolean; onceAt: string | null }
   /** This project's dashboard, or every project's card. */
   view: 'project' | 'all'
   /** Every registered project, most recently active first. */
@@ -87,6 +117,7 @@ export type PaneActions = {
   sort: () => void
   /** The person's answer to the host question, or the Host checks switch. */
   setHosts: (on: boolean) => void
+  checkHostsOnce: () => void
 }
 
 type Table = Elements['desktop'] | Elements['terminal'] | Elements['vscode'] | Elements['mobile']
@@ -97,6 +128,14 @@ type Table = Elements['desktop'] | Elements['terminal'] | Elements['vscode'] | E
  */
 let drawsImages = true
 const imageTable = (el: Table): el is Elements['desktop'] | Elements['vscode'] | Elements['mobile'] => drawsImages && 'Svg' in el
+
+/**
+ * Every surface but the terminal draws a Button as a native button, `plain` or
+ * not; the terminal draws a plain one as its text. So only actions are Buttons
+ * there, and names stay text. `canHover`: a pointer can reveal a row's control.
+ */
+let nativeButtons = true
+let canHover = true
 
 // ---------------------------------------------------------------------------
 // Colour and shape: two accents, mid-tones that read on light and dark alike
@@ -187,12 +226,13 @@ function rule(el: Table, cells: number) {
   return <Text dimColor>{'─'.repeat(Math.max(6, cells))}</Text>
 }
 
-const pct = (value: number | null) => (value === null ? '–' : `${value}%`)
+const pct = (value: number | null) => (value === null ? 'unknown' : `${value}%`)
 
 /** "checked just now", "checked 40s ago", "checked 3m ago": coarse, so the line doesn't flicker. */
 export function checkedLabel(checkedAt: string | null, nowMs: number): string {
   if (checkedAt === null) return 'not checked yet'
   const seconds = Math.max(0, Math.floor((nowMs - Date.parse(checkedAt)) / 1000))
+  if (Number.isNaN(seconds)) return 'checked: unknown'
   if (seconds < 10) return 'checked just now'
   if (seconds < 60) return `checked ${Math.floor(seconds / 10) * 10}s ago`
   if (seconds < 3600) return `checked ${Math.floor(seconds / 60)}m ago`
@@ -211,6 +251,8 @@ function isOpen(id: string, toggled: readonly string[]): boolean {
 
 export function renderPane(el: Table, data: PaneData, actions: PaneActions) {
   drawsImages = data.surface !== 'terminal'
+  nativeButtons = data.surface !== 'terminal'
+  canHover = data.surface === 'desktop' || data.surface === 'vscode'
   if (data.view === 'all' && data.projects.length > 0) return allProjects(el, data, actions)
   return thisProject(el, data, actions)
 }
@@ -281,31 +323,94 @@ const HEALTH_DOT: Record<string, { color?: string; dim?: boolean }> = {
   steady: { dim: true },
 }
 
+/** "live 60%", "live unknown", or nothing for a project that deploys nowhere. */
+function liveLabel(roadmap: Roadmap, data: PaneData): string | null {
+  const live = liveOf(roadmap, data.evidence).live
+  if (live !== null) return `live ${live}%`
+  return data.project.deployable ? 'live unknown' : null
+}
+
 function header(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneActions, columns: number) {
   const { Box, Button, Markdown, Text } = el
   const p = progressOf(roadmap.features)
   const health = healthOf(roadmap, data.evidence, data.nowMs)
   const dot = HEALTH_DOT[health.kind] ?? { dim: true }
+  const live = liveLabel(roadmap, data)
   return (
     <Box flexDirection="column">
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
         <Markdown text={`### ${roadmap.name.replace(/[#*_`[\]]/g, '')}`} />
         <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
-          <Text bold>{pct(p.overall)}</Text>
+          <Text>
+            <Text bold>{pct(p.built)}</Text>
+            <Text dimColor> built</Text>
+          </Text>
           <Button key="refresh" plain onPress={() => actions.refresh()}>
             {data.checking ? '…' : '↻'}
           </Button>
         </Box>
       </Box>
-      {bar(el, p.overall ?? 0, ACCENT, columns, `Overall ${pct(p.overall)}`)}
-      <Box flexDirection="row" justifyContent="space-between">
+      {p.built !== null && bar(el, p.built, ACCENT, columns, `Built ${pct(p.built)}`)}
+      <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
         <Text>
           <Text {...(dot.color ? { color: dot.color } : { dimColor: true })}>●</Text>
-          <Text dimColor> {health.label}</Text>
+          <Text dimColor> {health.kind === 'needs_you' ? health.detail : health.label}</Text>
         </Text>
-        <Text dimColor>{data.checking ? 'checking…' : checkedLabel(data.checkedAt, data.nowMs)}</Text>
+        <Text dimColor wrap="truncate-end">
+          {[live, data.checking ? 'checking…' : checkedLabel(data.checkedAt, data.nowMs)].filter(Boolean).join(' · ')}
+        </Text>
       </Box>
     </Box>
+  )
+}
+
+/**
+ * A row's name and what opens it. In the terminal the name itself is the
+ * plain Button that opens the row. Elsewhere the name is text and a small
+ * Details button opens it, shown while the pointer is on the row (always,
+ * where there is no pointer, and while it's open).
+ */
+function openableRow(el: Table, key: string, buttonKey: string, lead: unknown, name: unknown, isOpenRow: boolean, onToggle: () => void, trailing: unknown = null) {
+  const { Box, Button, Text } = el
+  if (!nativeButtons) {
+    return (
+      <Box key={key} flexDirection="row" columnGap={1} alignItems="center" justifyContent="space-between">
+        <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={1}>
+          {lead as never}
+          <Button key={buttonKey} plain onPress={onToggle}>
+            {name as never}
+          </Button>
+        </Box>
+        {trailing as never}
+      </Box>
+    )
+  }
+  const shown = isOpenRow || !canHover
+  return (
+    <Box key={key} flexDirection="row" columnGap={1} alignItems="center" justifyContent="space-between">
+      <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={1}>
+        {lead as never}
+        {name as never}
+      </Box>
+      <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
+        {trailing as never}
+        <Box {...(shown ? {} : { display: 'none' as const, hover: { display: 'flex' as const } })}>
+          <Button key={buttonKey} dimColor onPress={onToggle}>
+            <Text>{isOpenRow ? 'Hide' : 'Details'}</Text>
+          </Button>
+        </Box>
+      </Box>
+    </Box>
+  )
+}
+
+/** A show-or-hide control: "▸ 3 done" in the terminal, a button that says what it does elsewhere. */
+function disclosure(el: Table, key: string, open: boolean, closedLabel: string, openLabel: string, onPress: () => void, glyphLabel = closedLabel) {
+  const { Button, Text } = el
+  return (
+    <Button key={key} plain onPress={onPress}>
+      <Text dimColor>{nativeButtons ? (open ? openLabel : closedLabel) : `${open ? '▾' : '▸'} ${glyphLabel}`}</Text>
+    </Button>
   )
 }
 
@@ -451,7 +556,11 @@ export function rowPill(feature: Feature, ev: FeatureEvidence | undefined, data:
   if (feature.status === 'in_progress') return { label: 'In progress', tone: 'accent' }
   const p = progressOf([feature])
   if (feature.status === 'done') {
-    return data.capabilities.tests && p.unverified.length > 0 ? { label: 'Unverified', tone: 'neutral' } : { label: 'Done', tone: 'faint' }
+    // Recorded done and nothing disproves it: still done, marked unconfirmed.
+    if (data.capabilities.tests && p.unconfirmed.length > 0) return { label: 'Unconfirmed', tone: 'neutral' }
+    // Proven by the whole suite, with none of its own tests mapped.
+    if (feature.verified_by === 'suite' && ev?.tests_status !== 'pass') return { label: 'Built', tone: 'faint' }
+    return { label: 'Done', tone: 'faint' }
   }
   if (p.designedNotWorking.length > 0) return { label: 'UI ahead', tone: 'neutral' }
   if (data.capabilities.git && signalsOf(ev).includes('not wired in') && feature.status !== 'not_started') return { label: 'Not wired', tone: 'neutral' }
@@ -506,13 +615,8 @@ function featuresTab(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneA
               <Text dimColor>{group.isBacklog ? String(group.features.length) : `${done.length} / ${group.features.length}`}</Text>
             </Box>
             {live.map(feature => featureRow(el, feature, roadmap, queueOrder, data, actions))}
-            {done.length > 0 && (
-              <Button key={`section:done:${group.id}`} plain onPress={() => actions.toggleSection(`done:${group.id}`)}>
-                <Text dimColor>
-                  {showDone ? '▾' : '▸'} {done.length} done
-                </Text>
-              </Button>
-            )}
+            {done.length > 0 &&
+              disclosure(el, `section:done:${group.id}`, showDone, `Show ${done.length} done`, 'Hide done', () => actions.toggleSection(`done:${group.id}`), `${done.length} done`)}
             {showDone && done.map(feature => featureRow(el, feature, roadmap, queueOrder, data, actions))}
           </Box>
         )
@@ -549,18 +653,21 @@ function unsortedGroup(el: Table, data: PaneData, actions: PaneActions) {
 }
 
 function featureRow(el: Table, feature: Feature, roadmap: Roadmap, queueOrder: readonly string[], data: PaneData, actions: PaneActions) {
-  const { Box, Button, Text } = el
+  const { Box, Text } = el
   const isOpenRow = data.expanded === feature.id
   return (
     <Box flexDirection="column" key={`row:${feature.id}`}>
-      <Box flexDirection="row" columnGap={1} alignItems="center">
-        {pill(el, rowPill(feature, data.evidence[feature.id], data))}
-        <Button key={`feature:${feature.id}`} plain onPress={() => actions.toggleFeature(feature.id)}>
-          <Text wrap="truncate-end" {...(isOpenRow ? { bold: true } : {})}>
-            {feature.title}
-          </Text>
-        </Button>
-      </Box>
+      {openableRow(
+        el,
+        `line:${feature.id}`,
+        `feature:${feature.id}`,
+        pill(el, rowPill(feature, data.evidence[feature.id], data)),
+        <Text wrap="truncate-end" {...(isOpenRow ? { bold: true } : {})}>
+          {feature.title}
+        </Text>,
+        isOpenRow,
+        () => actions.toggleFeature(feature.id),
+      )}
       {isOpenRow && details(el, feature, roadmap, queueOrder, data, actions)}
     </Box>
   )
@@ -574,18 +681,23 @@ function details(el: Table, feature: Feature, roadmap: Roadmap, queueOrder: read
   // A blocked feature's reason is already on its row in Needs you; in Features it's said here.
   const waiting = waitingOn(feature, roadmap, ev)
   const freed = unblocks(feature, roadmap)
-  const state = feature.kind === 'ui' ? `UI ${feature.ui_state} · works ${feature.functional_state}` : `works ${feature.functional_state}`
-  const proof = feature.verified_by === null ? null : { ran: 'Claude ran it', tests: 'tests pass', user: 'you said so' }[feature.verified_by]
+  const uiState = feature.kind === 'ui' ? (data.project.uiKnown || feature.ui_state !== 'none' ? `UI ${feature.ui_state}` : 'UI unknown') : null
+  const works =
+    feature.functional_state === 'working' && feature.verified_by === 'suite' && ev?.tests_status !== 'pass'
+      ? 'built · tests not mapped'
+      : feature.status === 'done' && feature.functional_state !== 'working'
+        ? 'done · unconfirmed'
+        : `works ${feature.functional_state}`
+  const state = [uiState, works].filter(Boolean).join(' · ')
+  const proof =
+    feature.verified_by === null || works.startsWith('built')
+      ? null
+      : { ran: 'Claude ran it', tests: 'tests pass', user: 'you said so', coverage: 'the passing suite runs its code', suite: 'the whole suite passes' }[feature.verified_by]
   const evidence = ev
     ? [
-        capabilities.git
-          ? ev.files.some(file => file.wired === false)
-            ? 'not referenced anywhere'
-            : ev.files.some(file => file.wired === true)
-              ? 'wired in'
-              : null
-          : null,
+        ev.files.some(file => file.wired === false) ? 'not referenced anywhere' : ev.files.some(file => file.wired === true) ? 'wired in' : null,
         capabilities.tests && ev.tests_status !== 'none' ? `tests ${ev.tests_status === 'pass' ? 'pass' : ev.tests_status === 'fail' ? 'fail' : 'not run yet'}` : null,
+        ev.live === true ? 'live' : ev.live === false ? 'changed since the deploy' : null,
         ev.uncommitted ? 'uncommitted edits' : null,
         ...signalsOf(ev).filter(signal => /TODOs?$/.test(signal)),
       ].filter((part): part is string => part !== null)
@@ -648,14 +760,9 @@ function details(el: Table, feature: Feature, roadmap: Roadmap, queueOrder: read
 }
 
 const more = (el: Table, id: string, hidden: number, label: string, data: PaneData, actions: PaneActions) => {
-  const { Button, Text } = el
   if (hidden <= 0 && !isOpen(id, data.open)) return null
   const open = isOpen(id, data.open)
-  return (
-    <Button key={`section:${id}`} plain onPress={() => actions.toggleSection(id)}>
-      <Text dimColor>{open ? '▾ fewer' : `▸ ${hidden} ${label}`}</Text>
-    </Button>
-  )
+  return disclosure(el, `section:${id}`, open, `Show ${hidden} ${label}`, 'Show fewer', () => actions.toggleSection(id), open ? 'fewer' : `${hidden} ${label}`)
 }
 
 function needsTab(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneActions) {
@@ -677,14 +784,18 @@ function needsTab(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneActi
     <Box flexDirection="column" gap={1} marginTop={1}>
       {shown.map(({ feature, freed }) => (
         <Box flexDirection="column" key={`need:${feature.id}`}>
-          <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-            <Button key={`feature:${feature.id}`} plain onPress={() => actions.toggleFeature(feature.id)}>
-              <Text bold wrap="truncate-end">
-                {feature.title}
-              </Text>
-            </Button>
-            <Text dimColor>{freed > 0 ? `unblocks ${freed}` : ''}</Text>
-          </Box>
+          {openableRow(
+            el,
+            `line:${feature.id}`,
+            `feature:${feature.id}`,
+            null,
+            <Text bold wrap="truncate-end">
+              {feature.title}
+            </Text>,
+            data.expanded === feature.id,
+            () => actions.toggleFeature(feature.id),
+            freed > 0 ? <Text dimColor>unblocks {freed}</Text> : null,
+          )}
           <Text dimColor wrap="wrap">
             {feature.blocker_reason ?? ''}
           </Text>
@@ -783,23 +894,39 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
   const p = progressOf(roadmap.features)
   const firstOpen = roadmap.milestones
     .map(milestone => ({ milestone, p: progressOf(roadmap.features.filter(feature => feature.milestone === milestone.id)) }))
-    .find(one => (one.p.overall ?? 0) < 100)
+    .find(one => one.p.planned > 0 && (one.p.built ?? 0) < 100)
   const story = data.previousVisit ? catchUp(roadmap, data.previousVisit, data.visitCommits.length) : null
-  const week = scopeWeek(roadmap, data.nowMs)
-  const summary = weeklySummary(roadmap, data.evidence, data.nowMs)
+  const week = scopeWeek(roadmap, data.nowMs, data.merged)
+  const summary = weeklySummary(roadmap, data.evidence, data.nowMs, data.merged)
+  const live = liveLabel(roadmap, data)
 
   const row = (id: string, label: string, right: unknown, body: () => unknown) => {
     const open = isOpen(`drawer:${id}`, data.open)
+    const toggle = () => actions.toggleSection(`drawer:${id}`)
+    const summaryText = typeof right === 'string' ? <Text dimColor>{right}</Text> : (right as never)
     return (
       <Box flexDirection="column" key={`drawer:${id}`}>
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
-          <Button key={`section:drawer:${id}`} plain onPress={() => actions.toggleSection(`drawer:${id}`)}>
-            <Text {...(open ? {} : { dimColor: true })}>
-              {open ? '▾' : '▸'} {label}
-            </Text>
-          </Button>
-          {typeof right === 'string' ? <Text dimColor>{right}</Text> : (right as never)}
-        </Box>
+        {nativeButtons ? (
+          // The label is text; the button beside it says what it does.
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
+            <Text {...(open ? {} : { dimColor: true })}>{label}</Text>
+            <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
+              {summaryText}
+              <Button key={`section:drawer:${id}`} dimColor onPress={toggle}>
+                <Text>{open ? 'Hide' : 'Show'}</Text>
+              </Button>
+            </Box>
+          </Box>
+        ) : (
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
+            <Button key={`section:drawer:${id}`} plain onPress={toggle}>
+              <Text {...(open ? {} : { dimColor: true })}>
+                {open ? '▾' : '▸'} {label}
+              </Text>
+            </Button>
+            {summaryText}
+          </Box>
+        )}
         {open ? (body() as never) : null}
       </Box>
     )
@@ -839,32 +966,48 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
       {row(
         'progress',
         roadmap.milestones.length > 0 ? 'Milestones' : 'Progress',
-        firstOpen ? `${firstOpen.milestone.title} ${pct(firstOpen.p.overall)}` : `UI ${pct(p.ui)} · works ${pct(p.functional)}`,
+        firstOpen ? `${firstOpen.milestone.title} ${pct(firstOpen.p.built)}` : [`built ${pct(p.built)}`, live].filter(Boolean).join(' · '),
         () => (
           <Box flexDirection="column" paddingLeft={2} marginBottom={1} gap={1}>
             {roadmap.milestones.map(milestone => {
-              const features = roadmap.features.filter(feature => feature.milestone === milestone.id)
-              const mp = progressOf(features)
+              const mp = progressOf(roadmap.features.filter(feature => feature.milestone === milestone.id))
               return (
                 <Box flexDirection="column" key={`milestone:${milestone.id}`}>
                   <Box flexDirection="row" justifyContent="space-between">
                     <Text>{milestone.title}</Text>
                     <Text dimColor>
-                      {mp.counts.done} of {features.filter(feature => !feature.idea).length} · {pct(mp.overall)}
+                      {mp.builtCount} of {mp.planned} built · {pct(mp.built)}
                     </Text>
                   </Box>
-                  {bar(el, mp.overall ?? 0, ACCENT, columns - 2, `${milestone.title} ${pct(mp.overall)}`)}
+                  {mp.built !== null && bar(el, mp.built, ACCENT, columns - 2, `${milestone.title} ${pct(mp.built)}`)}
                 </Box>
               )
             })}
-            <Text dimColor wrap="wrap">
-              UI {pct(p.ui)} · works {pct(p.functional)}
-              {p.ui !== null && p.functional !== null && Math.abs(p.ui - p.functional) >= GAP_ALERT
-                ? p.ui > p.functional
-                  ? ` · UI is ${p.ui - p.functional} points ahead of the code`
-                  : ` · code is ${p.functional - p.ui} points ahead of the UI`
-                : ''}
-            </Text>
+            <Box flexDirection="column">
+              <Text dimColor wrap="wrap">
+                Built {p.builtCount} of {p.planned}
+                {live ? ` · ${live}` : ''}
+                {data.project.deploy ? ` (deployed ${data.project.deploy.commit}, from ${data.project.deploy.source})` : ''}
+              </Text>
+              <Text dimColor wrap="wrap">
+                {p.ui === null
+                  ? `No UI features · ${data.project.screens ?? 'unknown'} screens`
+                  : data.project.uiKnown
+                    ? `UI ${pct(p.ui)} · ${data.project.screens ?? 'unknown'} screens`
+                    : 'UI unknown: no screen could be recognised'}
+                {data.project.uiKnown && p.ui !== null && p.functional !== null && Math.abs(p.ui - p.functional) >= GAP_ALERT
+                  ? p.ui > p.functional
+                    ? ` · UI is ${p.ui - p.functional} points ahead of the code`
+                    : ` · code is ${p.functional - p.ui} points ahead of the UI`
+                  : ''}
+              </Text>
+              {data.project.tests > 0 && (
+                <Text dimColor wrap="wrap">
+                  {data.project.tests} test files
+                  {data.project.unmappedTests > 0 ? ` · ${data.project.unmappedTests} map to no feature` : ' · every one maps to a feature'}
+                </Text>
+              )}
+            </Box>
           </Box>
         ),
       )}
@@ -889,6 +1032,7 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
         lines([
           list('Added:', week.added) ?? 'Nothing added.',
           list('Done:', week.done) ?? 'Nothing finished.',
+          week.merges.length > 0 ? `${mergedLine(week.merges)}.` : null,
           week.added.length - week.done.length >= 2 ? 'Adding faster than finishing.' : null,
         ]),
       )}
@@ -901,12 +1045,20 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
         () => lines(summary.split('\n')),
       )}
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1} key="drawer:hosts">
-        {/* Non-breaking spaces stand in for the other rows' ▸, so the labels line up. */}
-        <Text dimColor>{'\u00a0\u00a0\u00a0'}Host checks</Text>
-        <Button key="hosts:toggle" plain onPress={() => actions.setHosts(!data.hostChecks.on)}>
-          <Text {...(data.hostChecks.on ? { color: ACCENT } : { dimColor: true })}>{data.hostChecks.on ? 'On' : 'Off'}</Text>
-        </Button>
+        {/* In the terminal, non-breaking spaces stand in for the other rows' ▸, so the labels line up. */}
+        <Text dimColor>{nativeButtons ? '' : '\u00a0\u00a0\u00a0'}Host checks</Text>
+        <Box flexDirection="row" columnGap={2}>
+          {data.hostChecks.on ? null : (
+            <Button key="hosts:once" plain onPress={() => actions.checkHostsOnce()}>
+              <Text color={ACCENT}>Check once</Text>
+            </Button>
+          )}
+          <Button key="hosts:toggle" plain onPress={() => actions.setHosts(!data.hostChecks.on)}>
+            <Text {...(data.hostChecks.on ? { color: ACCENT } : { dimColor: true })}>{data.hostChecks.on ? 'On' : 'Off'}</Text>
+          </Button>
+        </Box>
       </Box>
+      {!data.hostChecks.on && data.hostChecks.onceAt ? <Text dimColor>Hosts {checkedLabel(data.hostChecks.onceAt, data.nowMs)}, by Check once</Text> : null}
     </Box>
   )
 }
@@ -951,7 +1103,7 @@ function allProjects(el: Table, data: PaneData, actions: PaneActions) {
           <Text dimColor>Not found</Text>
           {gone.map(project => (
             <Text dimColor wrap="wrap">
-              {project.name} · {project.state === 'broken' ? 'nowhat.json has errors' : 'folder or nowhat.json gone'} · {tilde(project.path, data.home)}
+              {project.name} · {project.state === 'unknown' ? "unknown: nowhat.json can't be read" : 'folder or nowhat.json gone'} · {tilde(project.path, data.home)}
             </Text>
           ))}
         </Box>
@@ -965,28 +1117,36 @@ function projectCard(el: Table, project: ProjectSummary, data: PaneData, actions
   const isOpenCard = data.expandedProject === project.path
   const dot = project.health ? (HEALTH_DOT[project.health.kind] ?? { dim: true }) : { dim: true }
   const inner = Math.max(20, columns - 4)
-  const quiet = project.untouchedDays >= 14
-  const activity = project.untouchedDays === 0 ? 'Active today' : `Active ${ago(new Date(project.lastActiveMs).toISOString(), data.nowMs)}`
+  const quiet = (project.untouchedDays ?? 0) >= 14
+  const activity =
+    project.lastActiveMs === null ? 'Last active unknown' : project.untouchedDays === 0 ? 'Active today' : `Active ${ago(new Date(project.lastActiveMs).toISOString(), data.nowMs)}`
 
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1} key={`project:${project.path}`} {...(quiet ? { borderColor: ALERT } : { borderDimColor: true })}>
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1}>
-        <Button key={`project:${project.path}`} plain onPress={() => actions.toggleProject(project.path)}>
-          <Text bold>
-            {isOpenCard ? '▾ ' : ''}
-            {project.name}
-          </Text>
+      {openableRow(
+        el,
+        `card:${project.path}`,
+        `project:${project.path}`,
+        null,
+        <Text bold wrap="truncate-end">
+          {!nativeButtons && isOpenCard ? '▾ ' : ''}
+          {project.name}
           <Text dimColor>{project.isHere ? ' · here' : ''}</Text>
-        </Button>
-        <Text bold>{pct(project.overall)}</Text>
-      </Box>
-      {bar(el, project.overall ?? 0, ACCENT, inner, `${project.name} ${pct(project.overall)}`)}
+        </Text>,
+        isOpenCard,
+        () => actions.toggleProject(project.path),
+        <Text>
+          <Text bold>{pct(project.overall)}</Text>
+          <Text dimColor> built</Text>
+        </Text>,
+      )}
+      {project.overall !== null && bar(el, project.overall, ACCENT, inner, `${project.name} ${pct(project.overall)} built`)}
       <Box flexDirection="row" justifyContent="space-between">
         <Text>
           <Text {...(dot.color ? { color: dot.color } : { dimColor: true })}>●</Text>
           <Text dimColor> {project.health?.label ?? ''}</Text>
         </Text>
-        <Text dimColor>{project.ui === null ? `works ${pct(project.functional)}` : `UI ${pct(project.ui)} · works ${pct(project.functional)}`}</Text>
+        <Text dimColor>{project.livePct !== null ? `live ${project.livePct}%` : ''}</Text>
       </Box>
       {project.needsYou.length > 0 && <Text color={ALERT}>{project.needsYou.length} waiting on you</Text>}
       {project.next && (
@@ -1001,7 +1161,7 @@ function projectCard(el: Table, project: ProjectSummary, data: PaneData, actions
         </Text>
       ) : (
         <Text dimColor>
-          {activity} · {project.done} of {project.features} done
+          {activity} · {project.built} of {project.planned} built
         </Text>
       )}
       {isOpenCard && projectDetails(el, project, data, actions, inner)}
@@ -1048,17 +1208,17 @@ function projectDetails(el: Table, project: ProjectSummary, data: PaneData, acti
               <Box flexDirection="row" justifyContent="space-between">
                 <Text>{milestone.title}</Text>
                 <Text dimColor>
-                  {milestone.done} of {milestone.total} · {pct(milestone.overall)}
+                  {milestone.done} of {milestone.total} built · {pct(milestone.overall)}
                 </Text>
               </Box>
-              {bar(el, milestone.overall ?? 0, ACCENT, cells - 2, `${milestone.title} ${pct(milestone.overall)}`)}
+              {milestone.overall !== null && bar(el, milestone.overall, ACCENT, cells - 2, `${milestone.title} ${pct(milestone.overall)}`)}
             </Box>
           ))}
         </Box>
       )}
       {project.live !== null && (
         <Box marginTop={1}>
-          <Text dimColor>Deployed app: {project.live ? 'answering' : 'not answering'}</Text>
+          <Text dimColor>Deployed app: {project.live === 'unknown' ? 'unknown' : project.live ? 'answering' : 'not answering'}</Text>
         </Box>
       )}
       <Box flexDirection="column" marginTop={1}>

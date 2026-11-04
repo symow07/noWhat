@@ -90,10 +90,29 @@ export function deviceBuildOf(json: string): 'device' | 'simulator' | 'none' | n
   return onDevice ? 'device' : 'simulator'
 }
 
+/** The commit of the newest finished store build in `eas build:list --json`: what the stores have. */
+export function storeCommitOf(json: string): string | null {
+  let builds: unknown
+  try {
+    builds = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(builds)) return null
+  const store = builds
+    .filter((build): build is Record<string, unknown> => typeof build === 'object' && build !== null)
+    .filter(build => /finished/i.test(String(build.status ?? '')) && /store/i.test(String(build.distribution ?? '')) && typeof build.gitCommitHash === 'string')
+    .sort((a, b) => Date.parse(String(b.completedAt ?? b.createdAt ?? '')) - Date.parse(String(a.completedAt ?? a.createdAt ?? '')))
+  const commit = store[0]?.gitCommitHash
+  return typeof commit === 'string' && /^[0-9a-f]{7,40}$/.test(commit) ? commit : null
+}
+
 export type LaunchFacts = {
   kind: LaunchKind
   /** Pattern → the files matching it; null without git (then those checks are unknown). */
   found: Partial<Record<LaunchPattern, readonly string[]>> | null
+  /** Patterns whose search failed or timed out: their checks are unknown. */
+  unsearched?: readonly LaunchPattern[]
   files: readonly string[]
   /** app.json (or app.config.*) as text, for a store app. */
   appConfig: string | null
@@ -110,7 +129,9 @@ const shortUrl = (url: string) => url.replace(/^https?:\/\//, '').replace(/\/$/,
 /** The checklist for the project's kind; failures first, then unknowns, then what passed. */
 export function launchChecks(facts: LaunchFacts): LaunchCheck[] {
   const checks: LaunchCheck[] = []
-  const has = (pattern: LaunchPattern) => (facts.found === null ? null : (facts.found[pattern]?.length ?? 0) > 0)
+  // A pattern whose search couldn't run is unknown, never "not found".
+  const has = (pattern: LaunchPattern) =>
+    facts.found === null || facts.unsearched?.includes(pattern) ? null : (facts.found[pattern]?.length ?? 0) > 0
   const first = (pattern: LaunchPattern) => facts.found?.[pattern]?.[0]
   const add = (id: string, label: string, state: LaunchState, evidence: string) => checks.push({ id, label, state, evidence })
   const config = facts.appConfig ?? ''
@@ -122,12 +143,13 @@ export function launchChecks(facts: LaunchFacts): LaunchCheck[] {
     add(
       'privacy',
       'Privacy policy',
-      status === null ? 'unknown' : status >= 200 && status < 400 ? 'ok' : 'fail',
-      status === null
-        ? `Not checked yet · ${shortUrl(facts.privacy.url)}`
+      // No answer is unknown; a status of 0 is how an earlier version wrote that.
+      !status ? 'unknown' : status >= 200 && status < 400 ? 'ok' : 'fail',
+      !status
+        ? `No answer yet · ${shortUrl(facts.privacy.url)}`
         : status >= 200 && status < 400
           ? `Loads · ${shortUrl(facts.privacy.url)}`
-          : `${status ? `Answers ${status}` : "Doesn't load"} · ${shortUrl(facts.privacy.url)}`,
+          : `Answers ${status} · ${shortUrl(facts.privacy.url)}`,
     )
   } else if (route && facts.kind === 'web') add('privacy', 'Privacy policy', 'ok', `${name(route)} page`)
   else add('privacy', 'Privacy policy', 'fail', facts.kind === 'app' ? 'No URL found' : 'No page found')
@@ -140,7 +162,7 @@ export function launchChecks(facts: LaunchFacts): LaunchCheck[] {
       'deletion',
       'Account deletion',
       deletion === null ? 'unknown' : deletion ? 'ok' : 'fail',
-      deletion === null ? 'Needs git to check' : deletion ? `In ${name(first('deletion') ?? '')}` : 'Sign-up, no delete',
+      deletion === null ? (facts.found === null ? 'Needs git to check' : "Couldn't be searched") : deletion ? `In ${name(first('deletion') ?? '')}` : 'Sign-up, no delete',
     )
   }
 

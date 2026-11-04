@@ -285,6 +285,126 @@ test('the host question: answered once during setup, saved with the project, swi
   expect(reachedNetwork(w).length).toBe(before)
 })
 
+test('with host checks off, only Check once reaches a host: detect and a refresh never do', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: 'railway.json\nsrc/login.tsx\n' }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"DATABASE_URL":"postgres://secret"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  const evidence = () => JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  await ui.press({ key: 'hosts:no' })
+
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1', tests: true })
+  await ui.press({ key: 'refresh' })
+  expect(reachedNetwork(w)).toEqual([])
+
+  // The person's click: asked once, and what it found is kept and dated.
+  await ui.press({ key: 'hosts:once' })
+  expect(reachedNetwork(w).some(call => call.startsWith('railway'))).toBe(true)
+  expect(evidence().hosts_once).toBe(true)
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  expect(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text).not.toContain('postgres://secret')
+
+  // One time only: nothing after it reaches a host, and the answer stays.
+  const after = reachedNetwork(w).length
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd2' })
+  await ui.press({ key: 'refresh' })
+  expect(reachedNetwork(w).length).toBe(after)
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  expect(evidence().hosts_once).toBe(true)
+  expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
+})
+
+test('with host checks off, the privacy page and the EAS build list wait for Check once', async ($, on) => {
+  const privacy = 'https://acme.example/privacy'
+  const listing = ['railway.json', 'eas.json', 'ios/App/Info.plist', 'src/login.tsx']
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: `${listing.join('\n')}\n` }
+    if (argv[0] === 'git' && argv[1] === 'grep' && argv.includes('-o')) return { exitCode: 0, stdout: `${privacy}\n` }
+    if (argv[0] === 'eas') return { exitCode: 0, stdout: '[]' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: Object.fromEntries(listing.map(path => [path, '{}'])), run: answers })
+  const builds = () => w.ran.filter(argv => argv.slice(0, 2).join(' ') === 'eas build:list')
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  await ui.press({ key: 'hosts:no' })
+
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+  await ui.press({ key: 'refresh' })
+  expect(w.fetched).toEqual([])
+  expect(builds()).toEqual([])
+
+  // Both are in reach here: the person's click asks both, so the two lines above can fail.
+  await ui.press({ key: 'hosts:once' })
+  expect(w.fetched).toContain(privacy)
+  expect(builds().length).toBeGreaterThan(0)
+})
+
+test('a tool cannot ask for Check once, and the switch on then off still drops what the hosts said', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: 'railway.json\n' }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"DATABASE_URL":"x"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { 'railway.json': '{}' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  const evidence = () => JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  await ui.press({ key: 'hosts:no' })
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1', hosts: 'once' } as never)
+  expect(reachedNetwork(w)).toEqual([])
+
+  await ui.press({ key: 'hosts:once' })
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  await ui.press({ key: 'hosts:toggle' })
+  await ui.press({ key: 'refresh' })
+  expect(evidence().hosts_once).toBe(false)
+  await ui.press({ key: 'hosts:toggle' })
+  await ui.press({ key: 'refresh' })
+  expect(evidence().hosts).toEqual([])
+})
+
+test("with host checks on, Railway says which commit is deployed: live, read-only", async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: 'railway.json\nsrc/login.tsx\n' }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"DATABASE_URL":"postgres://secret"}' }
+    if (command === 'railway status --json') {
+      const deployment = { status: 'SUCCESS', createdAt: '2026-10-10T10:00:00Z', meta: { commitHash: 'abc1234' } }
+      return { exitCode: 0, stdout: JSON.stringify({ environments: [{ serviceInstances: [{ activeDeployments: [deployment] }] }] }) }
+    }
+    if (command === 'git diff --name-only abc1234 HEAD') return { exitCode: 0, stdout: 'src/login.tsx\n' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  expect(w.ran.some(argv => argv.join(' ') === 'railway status --json')).toBe(true)
+  const evidence = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  expect(evidence.project.deploy).toEqual({ source: 'Railway', commit: 'abc1234', changed: 1 })
+  // The login screen changed since that commit: built or not, it isn't live yet.
+  expect(evidence.features.login.live).toBe(false)
+  // The deployment's commit is kept; a variable's value never is.
+  expect(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text).not.toContain('postgres://secret')
+})
+
 test('a project set up without an answer asks at the top of the sidebar until it gets one', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
@@ -296,4 +416,116 @@ test('a project set up without an answer asks at the top of the sidebar until it
   expect(await ui.find({ key: 'hosts:no' })).toBeUndefined()
   expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
   expect(await ui.find({ type: 'Text', text: 'Off' })).toBeDefined()
+})
+
+/** A project with a deploy host: a repo whose git and Railway answer, and that says which address it's deployed at. */
+const hostedRepo = (files: Record<string, string>, reachable?: (url: string) => boolean | 'refused') => ({
+  files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n', ...files },
+  run: (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: `${['railway.json', 'src/login.tsx', ...Object.keys(files)].join('\n')}\n` }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"RAILWAY_PUBLIC_DOMAIN":"app.example.com"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  },
+  ...(reachable ? { reachable } : {}),
+})
+
+const PANE = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+const ENV_FILE = /(^|\/)\.env(\.[^/]+)?$/
+
+test('the local .env is never opened: not read, not stat-ed, not searched, and blocks nothing', async ($, on) => {
+  const secret = 'API_KEY=hunter2\nOTHER_KEY=swordfish\n'
+  const w = world(on, hostedRepo({ '.env': secret, '.env.local': secret, '.env.production': secret, 'apps/api/.env': secret }))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'login', title: 'Login', status: 'done', functional_state: 'partial', related_files: ['src/login.tsx'], needs_config: ['STRIPE_KEY'] }],
+  } as never)
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+
+  expect(w.touched.filter(path => ENV_FILE.test(path))).toEqual([])
+  // git grep reads what it searches, so a committed .env is left out of every search.
+  const greps = w.ran.filter(argv => argv[0] === 'git' && argv[1] === 'grep')
+  expect(greps.length).toBeGreaterThan(0)
+  for (const grep of greps) expect(grep.filter(arg => arg.includes('.env'))).toEqual([':(exclude,glob)**/.env', ':(exclude,glob)**/.env.*'])
+  const evidence = w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? ''
+  expect(evidence).not.toContain('API_KEY')
+  expect(evidence).not.toContain('local .env')
+  // Railway was asked, and Railway is what the block names.
+  expect(w.roadmap().features[0].blocker_reason).toBe('Missing in Railway: STRIPE_KEY')
+})
+
+test('with no deploy host a key is unknown: a .env without it blocks nothing', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    if (argv.join(' ') === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: '.env\nsrc/login.tsx\n' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { '.env': 'OTHER_KEY=swordfish\n', 'src/login.tsx': 'export default function Login() {}\n' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'login', title: 'Login', status: 'done', functional_state: 'partial', related_files: ['src/login.tsx'], needs_config: ['STRIPE_KEY'] }],
+  } as never)
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+  expect(w.touched.filter(path => ENV_FILE.test(path))).toEqual([])
+  expect(w.roadmap().features[0]).toMatchObject({ status: 'done', blocker_reason: null })
+  const evidence = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  expect(evidence.features.login).toMatchObject({ env_required: ['STRIPE_KEY'], env_missing: [], env_source: null })
+  expect(evidence.hosts).toEqual([])
+})
+
+test('with nothing to measure the pane says unknown, and draws no empty bar', async ($, on) => {
+  const w = world(on, hostedRepo({}, () => true))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'later', title: 'Later', idea: true }],
+  } as never)
+  expect(w.roadmap().features[0]?.idea).toBe(true)
+  expect(await ui.find({ type: 'Text', text: 'unknown' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '0%' })).toBeUndefined()
+  // A bar says its value in its alt; the pane's hairlines have none.
+  const bars = (await ui.findAll({ type: 'Svg' })).filter(svg => /built/i.test(String(svg.props.alt)))
+  expect(bars).toEqual([])
+})
+
+test("a deployed app that can't be reached is unknown: no status of 0, no Down", async ($, on) => {
+  const w = world(on, hostedRepo({}, () => false))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  expect(w.fetched.length).toBeGreaterThan(0)
+  const live = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').live
+  expect(live).toMatchObject({ url: 'https://app.example.com', ok: null, status: null })
+  expect(live.refused).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Down:/ })).toBeUndefined()
+})
+
+test('a deployed app that refuses the connection is Down: a dead server is an outage', async ($, on) => {
+  const w = world(on, hostedRepo({}, () => 'refused'))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  expect(w.fetched.length).toBeGreaterThan(0)
+  const live = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').live
+  expect(live).toMatchObject({ url: 'https://app.example.com', ok: false, status: null, refused: true })
+  expect(await ui.find({ type: 'Text', text: /^Down:/ })).toBeDefined()
 })

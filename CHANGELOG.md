@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Calibration: what noWhat can't read no longer counts against a project.
+
+### Added
+
+- **Check once.** With *Host checks* off, a button beside the switch asks your hosts one time and keeps what they said, dated, until you press it again. Only that click can: detect, a refresh and a new commit reach nothing while the switch is off. Host checks left on still run by themselves, as they did.
+
+### Fixed
+
+- **Tool configs and platform files read as "no longer wired in".** `eslint.config.js` is found by its tool and never imported, and `useThing.web.ts` is imported as `useThing`, so both looked unreferenced, and a proven feature flipped between working and broke.
+- **Wiring that timed out read as "nothing references this".** One `git grep -w` over a large repository could run for minutes against a 30-second cap, and the empty answer marked every file unwired, so nothing could reach *working*. Wiring now comes from one read of the files' text (about a second for a few thousand files), and a file noWhat couldn't read leaves wiring *unknown*, never *unwired*. Every other `git grep` that fails or times out is now *unknown* too.
+- **Server-rendered pages weren't screens.** Only component files counted, so a server whose route handlers return HTML showed UI 0%. The UI style is now decided first, and server pages are recognised by what they contain. With no screen recognisable at all, UI shows *unknown*, not 0%.
+- **Integration tests mapped to nothing.** Tests that call URLs now count for the modules behind the routes they call; a module nearly every handler calls is left out. The sidebar says how many test files map to no feature.
+- **Finished work stayed "in progress".** Work in progress that's proven and has no uncommitted edits becomes done, unless Claude set it in progress. When the whole suite passes and none of a feature's tests map to it, it's *built, tests not mapped*, not in progress. A coverage report, when the project has one, counts too.
+- **A recorded status was overruled.** A status Claude gives at setup or later is kept; *done* stays done, marked *unconfirmed* while nothing proves it, until a failing test or an unreferenced file disproves it.
+- **The local `.env` was read.** It stood in for a deploy host, blocking features on keys that live on the host. It is no longer read, stat-ed or searched, by any check: with no host, or a host that can't be read, config is *unknown*, and blocks an earlier version made from it lift. Committed templates (`.env.example`) are still read at setup, for their names. Names an EAS build profile sets in `eas.json` count as present.
+- **What couldn't be read showed as broken, or as zero.** A request that got no answer (this machine offline, DNS, a timeout) read as status 0 and *Down*; a project whose file couldn't be read read as *broken* with 0 features; a measure with nothing to measure read as 0%, with an empty bar. All of these now say *unknown*. A deployed app is *Down* on a 5xx answer or a refused connection, which means the address is there and nothing is serving. A privacy page counts as failing only on an answer it actually gave.
+- **One stale date made everything stale.** Coverage from several reports was held to the oldest report's date, so one old report threw away all of them; each file is now judged against its own report. A feature's staleness goes by its own dates, and a date that can't be read flags nothing.
+- **Screens counted files, not addresses.** A server with one file of many routes showed one screen for it. A server's screens are now the GET routes that answer with a page, followed through constants, templates and loops.
+- **Health said *Thriving* with things waiting on you.** Anything waiting on you now makes it *Needs you*.
+- **Milestones said "0 of 4 · 25%".** The count and the percentage are now one measure: features built of planned.
+- **The weekly summary said "Done: nothing" in a week of merged pull requests.** A built feature a merged pull request changed counts as done, and the summary says how many were merged.
+- **Feature names drew as bright native buttons on the desktop.** Only actions are buttons now: a name is plain text, and a *Details* button, shown on hover, opens the row. The terminal is unchanged.
+
+### Changed
+
+- **Claude is told not to read a deploy host on its own.** The rules used to send it to the host's CLI to check an env var name; now it asks first, read-only included.
+- **One new host call, behind host checks only:** `railway status --json`, read-only, for the commit Railway's serving deployment names. It's deployment metadata; no variable value is read or kept. Off until you say yes to host checks for the project, like every other host call.
+
+- The headline is the share of features **built**, and, when a deploy can be seen (the deployed app's own answer, Railway's deployed commit, a deploy branch or tag, or the newest store build), how much is **live**. Otherwise it says *live unknown*. Daily progress entries say which measure they used, so the weekly change never compares the two.
+- `scripts/detect-folder.ts` runs detection over any folder read-only and prints what noWhat makes of it, before and after.
+
 ## 0.3.0
 
 The first public release. Before it, the plugin was called `roadmap` and was never published.

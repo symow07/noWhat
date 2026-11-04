@@ -3,7 +3,7 @@
 // Pure, and terse by design: every string here is a headline or a fact.
 
 import type { FeatureEvidence } from './detect'
-import { type Feature, type Roadmap, type Status, ago, isStale, nextUp, progress } from './schema'
+import { type Feature, type Roadmap, type Status, ago, isBuilt, isStale, lastTouchedMs, nextUp, progress } from './schema'
 
 /** Untouched this many days: the project is stalled, and the sidebar says so. */
 export const STALLED_DAYS = 14
@@ -99,27 +99,26 @@ export function catchUp(roadmap: Roadmap, since: string, commits: number): Catch
   return isQuiet ? null : result
 }
 
-/** When anything last moved, in ms: the roadmap's own last touch, or the newest commit to any feature. */
-export function lastActive(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>): number {
-  let last = Date.parse(roadmap.last_touched) || 0
-  for (const ev of Object.values(evidence)) {
-    if (ev.last_change) last = Math.max(last, Date.parse(ev.last_change) || 0)
-  }
-  return last
+/** When anything last moved, in ms: the roadmap's own last touch, or the newest commit to any feature. Null when no date can be read. */
+export function lastActive(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>): number | null {
+  const dates = [roadmap.last_touched, ...Object.values(evidence).map(ev => ev.last_change ?? '')].map(date => Date.parse(date)).filter(Number.isFinite)
+  return dates.length > 0 ? Math.max(...dates) : null
 }
 
-/** Days since anything moved. */
-export function untouchedDays(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): number {
-  return Math.max(0, Math.floor((nowMs - lastActive(roadmap, evidence)) / DAY))
+/** Days since anything moved; null when that can't be read. */
+export function untouchedDays(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): number | null {
+  const last = lastActive(roadmap, evidence)
+  return last === null ? null : Math.max(0, Math.floor((nowMs - last) / DAY))
 }
 
-export type Health = { kind: 'thriving' | 'steady' | 'stalled' | 'needs_you'; label: string; detail: string }
+export type Health = { kind: 'thriving' | 'steady' | 'stalled' | 'needs_you' | 'unknown'; label: string; detail: string }
 
 /**
  * How the project is doing, for a glance across projects:
- * stalled when nothing moved in STALLED_DAYS, or all work in progress is stale;
- * needs you when it waits on the person and nothing else is moving;
- * thriving when it moved this week; steady otherwise.
+ * stalled when nothing moved in STALLED_DAYS; needs you whenever anything
+ * waits on the person (never "thriving" past an open item of theirs);
+ * stalled when all work in progress is stale; thriving when it moved this
+ * week; steady otherwise.
  */
 export function healthOf(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): Health {
   const days = untouchedDays(roadmap, evidence, nowMs)
@@ -127,9 +126,10 @@ export function healthOf(roadmap: Roadmap, evidence: Readonly<Record<string, Fea
   const inProgress = roadmap.features.filter(feature => feature.status === 'in_progress')
   const moving = inProgress.filter(feature => !isStale(feature, evidence[feature.id]?.last_change ?? null, nowMs))
 
-  if (days >= STALLED_DAYS) return { kind: 'stalled', label: 'Stalled', detail: `Untouched ${days} days` }
-  if (needsYou > 0 && moving.length === 0) return { kind: 'needs_you', label: 'Needs you', detail: `${needsYou} waiting on you` }
+  if (days !== null && days >= STALLED_DAYS) return { kind: 'stalled', label: 'Stalled', detail: `Untouched ${days} days` }
+  if (needsYou > 0) return { kind: 'needs_you', label: 'Needs you', detail: `${needsYou} waiting on you` }
   if (inProgress.length > 0 && moving.length === 0) return { kind: 'stalled', label: 'Stalled', detail: 'Work in progress has gone stale' }
+  if (days === null) return { kind: 'unknown', label: 'Unknown', detail: 'Last activity unknown' }
   if (days < ACTIVE_DAYS) return { kind: 'thriving', label: 'Thriving', detail: days === 0 ? 'Active today' : `Active ${days}d ago` }
   return { kind: 'steady', label: 'Steady', detail: `Last active ${days} days ago` }
 }
@@ -143,6 +143,20 @@ export function rabbitHoles(roadmap: Roadmap): { feature: Feature; sessions: num
     .sort((a, b) => b.sessions - a.sessions)
 }
 
+/** What the deployed app said: a status when it answered; refused when its address turned the connection down; neither when nothing came back. */
+export type LiveAnswer = { ok: boolean | null; status: number | null; refused?: boolean }
+
+/** The host names what went wrong only in the message: `... failed: ECONNREFUSED: ...`. */
+export const isConnectionRefused = (error: unknown): boolean => /\bECONNREFUSED\b/.test(error instanceof Error ? error.message : String(error))
+
+/**
+ * Whether the deployed app is up, as far as anyone can tell. An answer says, and
+ * so does a refused connection: the address is there and nothing is serving. No
+ * answer at all (this machine offline, DNS, a timeout) is unknown, null. A status
+ * of 0 is how an earlier version wrote no answer.
+ */
+export const liveAnswer = (live: LiveAnswer): boolean | null => (live.status ? live.ok : live.refused ? false : null)
+
 export type Alert = { kind: 'broke' | 'down' | 'rabbit' | 'stale' | 'quiet'; label: string; text: string }
 
 /**
@@ -152,7 +166,7 @@ export type Alert = { kind: 'broke' | 'down' | 'rabbit' | 'stale' | 'quiet'; lab
 export function alertsOf(
   roadmap: Roadmap,
   evidence: Readonly<Record<string, FeatureEvidence>>,
-  live: { ok: boolean; status: number } | null,
+  live: LiveAnswer | null,
   nowMs: number,
 ): Alert[] {
   const alerts: Alert[] = []
@@ -161,31 +175,62 @@ export function alertsOf(
     const reason = feature.regressed.reason === 'tests fail' ? `Tests fail since ${ago(feature.regressed.at, nowMs)}.` : `${capital(feature.regressed.reason)}.`
     alerts.push({ kind: 'broke', label: 'Broke', text: `${feature.title}. ${reason}` })
   }
-  if (live && !live.ok) alerts.push({ kind: 'down', label: 'Down', text: live.status ? `Deployed app answers ${live.status}.` : 'Deployed app not answering.' })
+  if (live && liveAnswer(live) === false) alerts.push({ kind: 'down', label: 'Down', text: live.status ? `Deployed app answers ${live.status}.` : 'Deployed app refused the connection.' })
   for (const hole of rabbitHoles(roadmap)) {
     alerts.push({ kind: 'rabbit', label: 'Rabbit hole', text: `${hole.feature.title}. ${hole.sessions} sessions, no progress.` })
   }
   for (const feature of roadmap.features) {
-    if (isStale(feature, evidence[feature.id]?.last_change ?? null, nowMs)) {
-      alerts.push({ kind: 'stale', label: 'Stale', text: `${feature.title}. In progress, untouched ${ago(feature.updated_at, nowMs).replace(' ago', '')}.` })
+    const lastChange = evidence[feature.id]?.last_change ?? null
+    if (isStale(feature, lastChange, nowMs)) {
+      const touched = new Date(lastTouchedMs(feature, lastChange) ?? nowMs).toISOString()
+      alerts.push({ kind: 'stale', label: 'Stale', text: `${feature.title}. In progress, untouched ${ago(touched, nowMs).replace(' ago', '')}.` })
     }
   }
   const days = untouchedDays(roadmap, evidence, nowMs)
-  if (days >= STALLED_DAYS) alerts.push({ kind: 'quiet', label: 'Untouched', text: `${days} days. Pick it up or park it.` })
+  if (days !== null && days >= STALLED_DAYS) alerts.push({ kind: 'quiet', label: 'Untouched', text: `${days} days. Pick it up or park it.` })
   return alerts
 }
 
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
-/** Features added and finished in the last 7 days: is scope growing faster than work gets done? */
-export function scopeWeek(roadmap: Roadmap, nowMs: number): { added: string[]; done: string[] } {
+/** A pull request or branch merged on the main line, with the features whose files it changed. */
+export type MergedWork = { at: string; pr: number | null; features: readonly string[] }
+
+/**
+ * Features added and finished in the last 7 days: is scope growing faster than
+ * work gets done? Finished counts a status that became done, and a built
+ * feature whose files a merged pull request changed: merged work is done work.
+ */
+export function scopeWeek(roadmap: Roadmap, nowMs: number, merged: readonly MergedWork[] = []): { added: string[]; done: string[]; merges: number[] } {
   const since = new Date(nowMs - 7 * DAY).toISOString()
   const recent = roadmap.recent_changes.filter(change => change.at >= since)
   const titles = (pick: (change: (typeof recent)[number]) => boolean) => [...new Map(recent.filter(pick).map(change => [change.id, change.title])).values()]
+  const thisWeek = merged.filter(merge => Date.parse(merge.at) >= nowMs - 7 * DAY)
+  const touched = new Set(thisWeek.flatMap(merge => merge.features))
+  const builtByMerge = roadmap.features.filter(feature => touched.has(feature.id) && !feature.idea && isBuilt(feature)).map(feature => feature.title)
   return {
     added: titles(change => change.field === 'added'),
-    done: titles(change => change.field === 'status' && change.to === 'done'),
+    done: [...new Set([...titles(change => change.field === 'status' && change.to === 'done'), ...builtByMerge])],
+    merges: thisWeek.flatMap(merge => (merge.pr === null ? [] : [merge.pr])).sort((a, b) => a - b),
   }
+}
+
+/** "12 PRs merged (#371–#382)", or "" when none were. */
+export function mergedLine(prs: readonly number[]): string {
+  if (prs.length === 0) return ''
+  const range = prs.length === 1 ? `#${prs[0]}` : `#${prs[0]}–#${prs[prs.length - 1]}`
+  return `${prs.length} PR${prs.length === 1 ? '' : 's'} merged (${range})`
+}
+
+/**
+ * Of the planned features, the share whose latest code is in the deployed
+ * commit. Null when nothing says which commit is deployed: unknown, not 0%.
+ */
+export function liveOf(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>): { live: number | null; count: number; planned: number } {
+  const planned = roadmap.features.filter(feature => !feature.idea)
+  const known = planned.some(feature => typeof evidence[feature.id]?.live === 'boolean')
+  const count = planned.filter(feature => isBuilt(feature) && evidence[feature.id]?.live === true).length
+  return { live: known && planned.length > 0 ? Math.round((count / planned.length) * 100) : null, count, planned: planned.length }
 }
 
 const SHORT_DATE = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })
@@ -194,14 +239,16 @@ const SHORT_DATE = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'sh
 export const shortDate = (iso: string) => SHORT_DATE.format(new Date(iso))
 
 /** A short progress report for the week, to paste anywhere: at most five lines. */
-export function weeklySummary(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number): string {
+export function weeklySummary(roadmap: Roadmap, evidence: Readonly<Record<string, FeatureEvidence>>, nowMs: number, merged: readonly MergedWork[] = []): string {
   const now = new Date(nowMs)
   const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - ((now.getUTCDay() + 6) % 7)))
   const overall = progress(roadmap).overall
   const weekAgo = new Date(nowMs - 7 * DAY).toISOString().slice(0, 10)
-  const before = [...roadmap.progress_log].reverse().find(entry => entry.day <= weekAgo)?.overall
+  // Only a day measured the same way: older entries averaged UI and works.
+  const before = [...roadmap.progress_log].reverse().find(entry => entry.day <= weekAgo && entry.measure === 'built')?.overall
   const delta = overall !== null && typeof before === 'number' && overall !== before ? ` (${overall > before ? '+' : ''}${overall - before})` : ''
-  const week = scopeWeek(roadmap, nowMs)
+  const week = scopeWeek(roadmap, nowMs, merged)
+  const merges = mergedLine(week.merges)
   const waiting = roadmap.features.filter(feature => feature.status === 'blocked' && feature.blocked_on === 'you')
   const broke = roadmap.features.filter(feature => feature.regressed !== null)
   const next = nextUp(roadmap)
@@ -209,7 +256,7 @@ export function weeklySummary(roadmap: Roadmap, evidence: Readonly<Record<string
 
   return [
     `${roadmap.name} · week of ${shortDate(monday.toISOString())}`,
-    `${overall ?? 0}%${delta}. Done: ${week.done.length > 0 ? list(week.done, 3) : 'nothing'}.`,
+    `Built ${overall === null ? 'unknown' : `${overall}%`}${delta}. Done: ${week.done.length > 0 ? list(week.done, 3) : 'nothing'}${merges ? `; ${merges}` : ''}.`,
     waiting.length > 0 ? `Waiting on you: ${waiting.length} (${list(waiting.map(feature => feature.title), 3)}).` : '',
     broke.length > 0 ? `Broke: ${list(broke.map(feature => feature.title), 3)}.` : '',
     next ? `Next: ${next.title}.` : '',

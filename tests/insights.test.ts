@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { FeatureEvidence } from '../hooks/detect'
-import { alertsOf, catchUp, healthOf, rabbitHoles, scopeWeek, unblocks, untouchedDays, waitingOn, weeklySummary } from '../hooks/insights'
-import { type Change, type Feature, type Roadmap, blankFeature } from '../hooks/schema'
+import { alertsOf, catchUp, isConnectionRefused, healthOf, lastActive, rabbitHoles, scopeWeek, unblocks, untouchedDays, waitingOn, weeklySummary } from '../hooks/insights'
+import { type Change, type Feature, type Roadmap, blankFeature, isStale } from '../hooks/schema'
 
 const NOW = '2026-10-12T12:00:00.000Z'
 const NOW_MS = Date.parse(NOW)
@@ -98,6 +98,9 @@ describe('health', () => {
   test('thriving, needs you, stalled', () => {
     const moving = roadmapOf([feature('a', { status: 'in_progress', updated_at: NOW })])
     expect(healthOf(moving, {}, NOW_MS).kind).toBe('thriving')
+    // Never thriving past something that waits on the person, however busy the rest is.
+    const busy = roadmapOf([feature('a', { status: 'in_progress', updated_at: NOW }), feature('b', { status: 'blocked', blocker_reason: 'Stripe key', blocked_on: 'you' })])
+    expect(healthOf(busy, {}, NOW_MS)).toMatchObject({ kind: 'needs_you', detail: '1 waiting on you' })
 
     const waiting = roadmapOf([feature('a', { status: 'blocked', blocker_reason: 'Stripe key', blocked_on: 'you' })])
     expect(healthOf(waiting, {}, NOW_MS)).toMatchObject({ kind: 'needs_you', detail: '1 waiting on you' })
@@ -134,7 +137,22 @@ describe('alerts, rabbit holes, scope and the weekly summary', () => {
     const roadmap = roadmapOf([], {
       recent_changes: [change(1, 'a', 'added', 'not_started'), change(2, 'b', 'added', 'queued'), change(3, 'c', 'status', 'done'), change(9, 'd', 'added', 'queued')],
     })
-    expect(scopeWeek(roadmap, NOW_MS)).toEqual({ added: ['A', 'B'], done: ['C'] })
+    expect(scopeWeek(roadmap, NOW_MS)).toEqual({ added: ['A', 'B'], done: ['C'], merges: [] })
+  })
+
+  test('merged work is done work: a built feature a merged pull request changed', () => {
+    const roadmap = roadmapOf([
+      feature('books', { status: 'done', functional_state: 'working', verified_by: 'suite' }),
+      feature('draft', { status: 'in_progress' }),
+    ])
+    const merged = [
+      { at: at(1), pr: 382, features: ['books', 'draft'] },
+      { at: at(2), pr: 375, features: ['books'] },
+      { at: at(9), pr: 300, features: ['books'] },
+    ]
+    // Draft isn't built, so its merge doesn't finish it; the old merge is last week's.
+    expect(scopeWeek(roadmap, NOW_MS, merged)).toEqual({ added: [], done: ['BOOKS'], merges: [375, 382] })
+    expect(weeklySummary(roadmap, {}, NOW_MS, merged).split('\n')[1]).toBe('Built 50%. Done: BOOKS; 2 PRs merged (#375–#382).')
   })
 
   test('the weekly summary: five short lines at most', () => {
@@ -147,10 +165,72 @@ describe('alerts, rabbit holes, scope and the weekly summary', () => {
       {
         name: 'Shop',
         recent_changes: [{ at: at(1), id: 'done-one', title: 'Checkout', field: 'status', from: 'in_progress', to: 'done', source: 'claude' }],
-        progress_log: [{ day: at(8).slice(0, 10), overall: 10 }],
+        progress_log: [{ day: at(8).slice(0, 10), overall: 10, measure: 'built' }],
       },
     )
     const summary = weeklySummary(roadmap, {}, NOW_MS).split('\n')
-    expect(summary).toEqual(['Shop · week of 12 Oct', '17% (+7). Done: Checkout.', 'Waiting on you: 1 (KEYS).', 'Next: PAY.'])
+    expect(summary).toEqual(['Shop · week of 12 Oct', 'Built 33% (+23). Done: Checkout.', 'Waiting on you: 1 (KEYS).', 'Next: PAY.'])
+  })
+})
+
+describe("what can't be read is unknown", () => {
+  const roadmap = (fields: Partial<Roadmap> = {}) => roadmapOf([], fields)
+
+  test('a deployed app nobody could reach is not Down; one that answered 503 or refused the connection is', () => {
+    const down = (live: Parameters<typeof alertsOf>[2]) => alertsOf(roadmap(), {}, live, NOW_MS).filter(alert => alert.kind === 'down')
+    expect(down({ ok: null, status: null })).toEqual([])
+    // Written by an earlier version: a status of 0 only ever meant no answer.
+    expect(down({ ok: false, status: 0 })).toEqual([])
+    expect(down({ ok: false, status: 503 })).toHaveLength(1)
+    expect(down({ ok: false, status: null, refused: true })[0]).toMatchObject({ label: 'Down', text: 'Deployed app refused the connection.' })
+  })
+
+  test("a refused connection is told from the rest by the host's own words", () => {
+    // Messages measured from the real $.http.fetch: a closed port, and a name that doesn't resolve.
+    expect(isConnectionRefused(new Error('nowhat: $.http.fetch(http://127.0.0.1:9/) failed: ECONNREFUSED: ECONNREFUSED: Unable to connect. Is the computer able to access the url?'))).toBe(true)
+    expect(isConnectionRefused(new Error('nowhat: $.http.fetch(http://no-such-host.invalid/) failed: ENOTFOUND: getaddrinfo ENOTFOUND no-such-host.invalid'))).toBe(false)
+    expect(isConnectionRefused(new Error('timed out'))).toBe(false)
+    expect(isConnectionRefused(null)).toBe(false)
+  })
+
+  test('a date nobody can read is no age: not thousands of days, not stalled', () => {
+    const unreadable = roadmap({ last_touched: 'not a date', features: [] })
+    expect(lastActive(unreadable, {})).toBeNull()
+    expect(untouchedDays(unreadable, {}, NOW_MS)).toBeNull()
+    expect(healthOf(unreadable, {}, NOW_MS)).toMatchObject({ kind: 'unknown', label: 'Unknown' })
+    expect(alertsOf(unreadable, {}, null, NOW_MS)).toEqual([])
+  })
+
+  test('the weekly summary says unknown, never 0%, when there is nothing to measure', () => {
+    expect(weeklySummary(roadmap({ features: [] }), {}, NOW_MS)).toContain('Built unknown.')
+    expect(weeklySummary(roadmap({ features: [] }), {}, NOW_MS)).not.toContain('0%')
+  })
+})
+
+describe('each item on its own date', () => {
+  const inProgress = (id: string, updated_at: string) => feature(id, { status: 'in_progress', updated_at })
+  const evidenceAt = (last_change: string) => ({ last_change, files: [], tests: [], tests_status: 'none', env_required: [], env_missing: [], env_source: null, recent_changes: 0, uncommitted: false, commits: [] }) as unknown as FeatureEvidence
+
+  test("one feature's old date flags that feature, and no other", () => {
+    const old = new Date(NOW_MS - 30 * DAY).toISOString()
+    const fresh = new Date(NOW_MS - DAY).toISOString()
+    // All three were last written together, long ago; only b has had no commit since.
+    const stale = alertsOf(roadmapOf([inProgress('a', old), inProgress('b', old), inProgress('c', old)]), { a: evidenceAt(fresh), c: evidenceAt(fresh) }, null, NOW_MS).filter(alert => alert.kind === 'stale')
+    expect(stale.map(alert => alert.text)).toEqual(['B. In progress, untouched 30d.'])
+  })
+
+  test('the alert gives the date it judged by: the newest of the feature\'s own', () => {
+    const old = new Date(NOW_MS - 30 * DAY).toISOString()
+    const later = new Date(NOW_MS - 10 * DAY).toISOString()
+    const [alert] = alertsOf(roadmapOf([inProgress('a', old)]), { a: evidenceAt(later) }, null, NOW_MS).filter(one => one.kind === 'stale')
+    expect(alert?.text).toBe('A. In progress, untouched 10d.')
+  })
+
+  test('a date that cannot be read flags nothing', () => {
+    const unreadable = inProgress('a', 'not a date')
+    expect(isStale(unreadable, null, NOW_MS)).toBe(false)
+    expect(isStale(unreadable, 'also not a date', NOW_MS)).toBe(false)
+    // One bad date doesn't hide the good one beside it.
+    expect(isStale(unreadable, new Date(NOW_MS - 30 * DAY).toISOString(), NOW_MS)).toBe(true)
   })
 })

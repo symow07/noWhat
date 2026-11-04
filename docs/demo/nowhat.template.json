@@ -121,7 +121,7 @@
     { "at": "@-9d", "text": "Notes live in SQLite on the device, because they must work offline", "feature": "offline-sync" }
   ],
   "progress_log": [
-    { "day": "@-8d", "overall": 49 }, { "day": "@-6d", "overall": 52 }, { "day": "@-4d", "overall": 56 }, { "day": "@-2d", "overall": 58 }, { "day": "@-1d", "overall": 60 }
+    { "day": "@-8d", "overall": 23, "measure": "built" }, { "day": "@-6d", "overall": 31, "measure": "built" }, { "day": "@-4d", "overall": 38, "measure": "built" }, { "day": "@-2d", "overall": 46, "measure": "built" }, { "day": "@-1d", "overall": 46, "measure": "built" }
   ],
   "ignored_files": []
 }
