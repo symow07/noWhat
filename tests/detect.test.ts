@@ -15,6 +15,7 @@ import {
   parseGrepMatches,
   parseTestRun,
   referenceNames,
+  asksHosts,
   importNames,
   importPatterns,
   findImports,
@@ -496,6 +497,24 @@ describe('coverage, deploys and merges', () => {
       [382, ['src/web/orders.ts', 'src/core/store.ts']],
       [381, ['src/web/orders.ts']],
     ])
+  })
+})
+
+describe('reaching a deploy host', () => {
+  test('with the switch off, nothing asks but Check once, stale or not', () => {
+    for (const stale of [true, false]) {
+      expect(asksHosts('skip', false, stale)).toBe(false)
+      expect(asksHosts('cached', false, stale)).toBe(false)
+      expect(asksHosts('refresh', false, stale)).toBe(false)
+      expect(asksHosts('once', false, stale)).toBe(true)
+    }
+  })
+
+  test('with it on, a refresh always asks, a background check when stale, a skip never', () => {
+    expect(asksHosts('refresh', true, false)).toBe(true)
+    expect(asksHosts('cached', true, true)).toBe(true)
+    expect(asksHosts('cached', true, false)).toBe(false)
+    expect(asksHosts('skip', true, true)).toBe(false)
   })
 })
 

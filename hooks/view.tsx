@@ -84,7 +84,8 @@ export type PaneData = {
   /** The person ran /nowhat (or pressed Set up) here in this session. */
   setupRequested: boolean
   /** Host checks for this project: whether the person answered, and whether they're on. */
-  hostChecks: { answered: boolean; on: boolean }
+  /** onceAt: when Check once last asked, while its answer stands with the switch off. */
+  hostChecks: { answered: boolean; on: boolean; onceAt: string | null }
   /** This project's dashboard, or every project's card. */
   view: 'project' | 'all'
   /** Every registered project, most recently active first. */
@@ -115,6 +116,7 @@ export type PaneActions = {
   sort: () => void
   /** The person's answer to the host question, or the Host checks switch. */
   setHosts: (on: boolean) => void
+  checkHostsOnce: () => void
 }
 
 type Table = Elements['desktop'] | Elements['terminal'] | Elements['vscode'] | Elements['mobile']
@@ -1043,10 +1045,18 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={1} key="drawer:hosts">
         {/* In the terminal, non-breaking spaces stand in for the other rows' ▸, so the labels line up. */}
         <Text dimColor>{nativeButtons ? '' : '\u00a0\u00a0\u00a0'}Host checks</Text>
-        <Button key="hosts:toggle" plain onPress={() => actions.setHosts(!data.hostChecks.on)}>
-          <Text {...(data.hostChecks.on ? { color: ACCENT } : { dimColor: true })}>{data.hostChecks.on ? 'On' : 'Off'}</Text>
-        </Button>
+        <Box flexDirection="row" columnGap={2}>
+          {data.hostChecks.on ? null : (
+            <Button key="hosts:once" plain onPress={() => actions.checkHostsOnce()}>
+              <Text color={ACCENT}>Check once</Text>
+            </Button>
+          )}
+          <Button key="hosts:toggle" plain onPress={() => actions.setHosts(!data.hostChecks.on)}>
+            <Text {...(data.hostChecks.on ? { color: ACCENT } : { dimColor: true })}>{data.hostChecks.on ? 'On' : 'Off'}</Text>
+          </Button>
+        </Box>
       </Box>
+      {!data.hostChecks.on && data.hostChecks.onceAt ? <Text dimColor>Hosts {checkedLabel(data.hostChecks.onceAt, data.nowMs)}, by Check once</Text> : null}
     </Box>
   )
 }

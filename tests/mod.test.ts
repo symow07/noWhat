@@ -285,6 +285,69 @@ test('the host question: answered once during setup, saved with the project, swi
   expect(reachedNetwork(w).length).toBe(before)
 })
 
+test('with host checks off, only Check once reaches a host: detect and a refresh never do', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: 'railway.json\nsrc/login.tsx\n' }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"DATABASE_URL":"postgres://secret"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  const evidence = () => JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  await ui.press({ key: 'hosts:no' })
+
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1', tests: true })
+  await ui.press({ key: 'refresh' })
+  expect(reachedNetwork(w)).toEqual([])
+
+  // The person's click: asked once, and what it found is kept and dated.
+  await ui.press({ key: 'hosts:once' })
+  expect(reachedNetwork(w).some(call => call.startsWith('railway'))).toBe(true)
+  expect(evidence().hosts_once).toBe(true)
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  expect(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text).not.toContain('postgres://secret')
+
+  // One time only: nothing after it reaches a host, and the answer stays.
+  const after = reachedNetwork(w).length
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd2' })
+  await ui.press({ key: 'refresh' })
+  expect(reachedNetwork(w).length).toBe(after)
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  expect(evidence().hosts_once).toBe(true)
+  expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
+})
+
+test('a tool cannot ask for Check once, and the switch on then off still drops what the hosts said', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: 'railway.json\n' }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"DATABASE_URL":"x"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { 'railway.json': '{}' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await setUp($, { name: 'Sample', features: FEATURES })
+  const props = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props })
+  const evidence = () => JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  await ui.press({ key: 'hosts:no' })
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1', hosts: 'once' } as never)
+  expect(reachedNetwork(w)).toEqual([])
+
+  await ui.press({ key: 'hosts:once' })
+  expect(evidence().hosts.length).toBeGreaterThan(0)
+  await ui.press({ key: 'hosts:toggle' })
+  await ui.press({ key: 'refresh' })
+  expect(evidence().hosts_once).toBe(false)
+  await ui.press({ key: 'hosts:toggle' })
+  await ui.press({ key: 'refresh' })
+  expect(evidence().hosts).toEqual([])
+})
+
 test("with host checks on, Railway says which commit is deployed: live, read-only", async ($, on) => {
   const answers = (argv: readonly string[]) => {
     const command = argv.join(' ')

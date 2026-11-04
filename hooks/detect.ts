@@ -130,6 +130,15 @@ export type Manifest = { path: string; text: string }
 export type TestCommand = { dir: string; argv: string[] }
 export type HostKind = 'railway' | 'eas' | 'vercel' | 'fly' | 'netlify' | 'dotenv'
 
+/** What a check wants from the hosts. `once` is a person pressing Check once: only that button passes it. */
+export type HostAsk = 'cached' | 'refresh' | 'once' | 'skip'
+
+/** Whether this check asks the hosts now. With the switch off, only Check once does, whoever else is asking. */
+export function asksHosts(ask: HostAsk, switchOn: boolean, isStale: boolean): boolean {
+  if (ask === 'once') return true
+  return switchOn && (ask === 'refresh' || (ask === 'cached' && isStale))
+}
+
 const JS_FRAMEWORKS: Record<string, string> = {
   next: 'Next.js', expo: 'Expo', 'react-native': 'React Native', react: 'React', vue: 'Vue', nuxt: 'Nuxt',
   svelte: 'Svelte', '@sveltejs/kit': 'SvelteKit', astro: 'Astro', '@remix-run/react': 'Remix',

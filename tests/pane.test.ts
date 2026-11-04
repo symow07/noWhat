@@ -227,6 +227,17 @@ test('a regression shows the alert strip and becomes next up', async ($, on) => 
   }
 })
 
+test('Check once sits beside the switch while it is off, and says when it last asked', async ($, on) => {
+  await sample($, on)
+  const ui = await mountPane($, 'desktop')
+  await ui.press({ key: 'hosts:no' })
+  expect(await ui.find({ key: 'hosts:once' })).toBeDefined()
+  await ui.press({ key: 'hosts:once' })
+  expect(await ui.find({ type: 'Text', text: /^Hosts checked just now, by Check once/ })).toBeDefined()
+  await ui.press({ key: 'hosts:toggle' })
+  expect(await ui.find({ key: 'hosts:once' })).toBeUndefined()
+})
+
 test('refresh re-checks now without tests, and the summary copies in one click', async ($, on) => {
   const w = await sample($, on)
   const ui = await mountPane($, 'desktop')

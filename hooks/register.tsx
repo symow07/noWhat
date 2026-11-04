@@ -28,6 +28,8 @@ import {
   deployRefOf,
   easProfileNames,
   railwayDeployOf,
+  asksHosts,
+  type HostAsk,
   envPresenceOf,
   envNamesFrom,
   envReads,
@@ -239,7 +241,7 @@ const CONTEXT_SPEC = {
 const DETECT_SPEC = {
   name: 'detect',
   description:
-    "Re-read the evidence for every feature now (wiring, TODO markers, git activity, the deploy host's env var names, and with tests: true the project's test suites) and apply what it proves to .claude/nowhat.json. Returns what changed.",
+    "Re-read the evidence for every feature now (wiring, TODO markers, git activity, the deploy host's env var names if the user turned Host checks on, and with tests: true the project's test suites) and apply what it proves to .claude/nowhat.json. Returns what changed.",
   inputSchema: {
     type: 'object',
     properties: { tests: { type: 'boolean', description: "also run the project's test suites (slow)" } },
@@ -630,6 +632,8 @@ type EvidenceFile = {
   hosts_checked_at: string | null
   /** What host checks depend on (HEAD, host and env file times): a change re-checks them early. */
   hosts_key?: string | null
+  /** With the switch off: what the hosts said came from Check once, so it stays until the next one. */
+  hosts_once?: boolean
   launch?: LaunchEvidence | null
   /** New source files no feature claims, for the sidebar's Unsorted group. */
   unsorted?: string[]
@@ -884,7 +888,7 @@ async function runTests(
   return { runs, results }
 }
 
-type DetectOptions = { hosts: 'cached' | 'refresh' | 'skip'; tests: boolean }
+type DetectOptions = { hosts: HostAsk; tests: boolean }
 
 /**
  * Source files added since the last sort (by commit range when it's reachable,
@@ -928,6 +932,7 @@ async function gatherLaunch(
   liveUrl: string | null,
   now: string,
   allowed: boolean,
+  keptOnce: boolean,
 ): Promise<LaunchEvidence | null> {
   const kind = launchKind(inventory.frameworks, files)
   if (kind === null) return null
@@ -992,7 +997,7 @@ async function gatherLaunch(
     deviceBuild,
     liveUrl,
   })
-  return { kind, checks, privacy, device_build: deviceBuild, store_commit: allowed ? storeCommit : null }
+  return { kind, checks, privacy, device_build: deviceBuild, store_commit: allowed || keptOnce ? storeCommit : null }
 }
 
 /**
@@ -1052,15 +1057,17 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
     }
   }
 
-  // Hosts: asked on a refresh, after HOST_TTL_MS, or when HEAD or a host or env file changed; otherwise the last answer stands.
+  // Hosts: with the switch on, asked on a refresh, after HOST_TTL_MS, or when HEAD or a host or env file changed; otherwise the last answer stands.
+  // With it off, only Check once asks. Its answer stands until the next one; any other answer is dropped.
   let hosts = previous?.hosts ?? []
   let hostsCheckedAt = previous?.hosts_checked_at ?? null
   let live = previous?.live ?? null
   let hostDeploy = previous?.host_deploy ?? null
   const hostsKey = await hostsKeyOf($, root, files, isGit)
   const isStale = hostsCheckedAt === null || nowMs - Date.parse(hostsCheckedAt) > HOST_TTL_MS || hostsKey !== (previous?.hosts_key ?? null)
-  const allowed = await hostsOn($, root)
-  const hostsDue = allowed && (options.hosts === 'refresh' || (options.hosts === 'cached' && isStale))
+  const once = options.hosts === 'once'
+  const allowed = once || (await hostsOn($, root))
+  const hostsDue = asksHosts(options.hosts, allowed, isStale)
   if (hostsDue) {
     const checked = await checkHosts($, root, files, inventory, manifests)
     hosts = checked.checks
@@ -1078,12 +1085,13 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
       }
     }
   }
-  if (!allowed) {
+  const keptOnce = !allowed && previous?.hosts_once === true
+  if (!allowed && !keptOnce) {
     hosts = []
     live = null
     hostDeploy = null
   }
-  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now, allowed)
+  const launch = await gatherLaunch($, root, files, inventory, isGit, previous?.launch ?? null, hostsDue, live?.url ?? null, now, allowed, keptOnce)
   const unsorted = isGit ? await gatherUnsorted($, root, roadmap, fileSet) : []
 
   let testRuns = previous?.test_runs ?? []
@@ -1143,6 +1151,7 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
     checked_at: now,
     hosts_checked_at: hostsCheckedAt,
     hosts_key: hostsDue ? hostsKey : (previous?.hosts_key ?? null),
+    hosts_once: once || keptOnce,
     launch,
     unsorted,
     project: {
@@ -1186,8 +1195,9 @@ let detectAgain: DetectOptions | null = null
 /** Re-reads the evidence and applies it to the roadmap; returns a short account of what changed. */
 function detect($: $, options: DetectOptions): Promise<string> {
   if (detecting) {
+    const asked = [detectAgain?.hosts, options.hosts]
     detectAgain = {
-      hosts: detectAgain?.hosts === 'refresh' || options.hosts === 'refresh' ? 'refresh' : options.hosts,
+      hosts: asked.includes('once') ? 'once' : asked.includes('refresh') ? 'refresh' : options.hosts,
       tests: (detectAgain?.tests ?? false) || options.tests,
     }
     return detecting
@@ -1235,7 +1245,9 @@ function describeDetection(evidence: EvidenceFile, changes: readonly Change[]): 
     `Checked ${Object.keys(evidence.features).length} features.`,
     scan ? `Wiring: read ${scan.files} files in ${scan.ms}ms${scan.complete ? '' : '; not every file could be read, so a file referenced nowhere shows as unknown'}.` : '',
     project.ui_style ? `UI: ${UI_STYLE_WORDS[project.ui_style]}; ${project.screens} screens.` : '',
-    hosts.length > 0 ? `Config: ${hosts.join('; ')}.` : 'Config: not checked (host checks are off for this project, or no deploy host was found).',
+    hosts.length > 0
+      ? `Config${evidence.hosts_once ? ` (from Check once, ${evidence.hosts_checked_at})` : ''}: ${hosts.join('; ')}.`
+      : 'Config: not checked (host checks are off for this project, or no deploy host was found).',
     runs.length > 0 ? `Tests: ${runs.join('; ')}.` : '',
     project.unmapped_tests !== undefined
       ? `Test files: ${project.tests.length}, ${project.unmapped_tests} mapped to no feature${project.unmapped_tests > 0 ? ' (they test files no feature claims, or reach code no route mapping found)' : ''}.`
@@ -2071,7 +2083,11 @@ export const register: Register = (on, options) => {
         columns: e.props.bodyColumns,
         captureKey: `capture:${await read($, captureGeneration)}`,
         setupRequested: await read($, setupRequested),
-        hostChecks: { answered: await hostsAnswered($, place.root), on: await hostsOn($, place.root) },
+        hostChecks: {
+          answered: await hostsAnswered($, place.root),
+          on: await hostsOn($, place.root),
+          onceAt: evidence?.hosts_once ? evidence.hosts_checked_at : null,
+        },
         view,
         projects,
         unsorted: evidence?.unsorted ?? [],
@@ -2094,6 +2110,7 @@ export const register: Register = (on, options) => {
         setup: () => quietly(requestSetup($).then(() => startTurn($, SETUP_PROMPT))),
         sort: () => quietly(startTurn($, SORT_PROMPT)),
         setHosts: allow => quietly(setHosts($, allow)),
+        checkHostsOnce: () => quietly(detect($, { hosts: 'once', tests: false })),
       },
     )
   }).catch(($, e) => {

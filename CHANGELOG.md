@@ -4,6 +4,14 @@
 
 Calibration: what noWhat can't read no longer counts against a project.
 
+### Added
+
+- **Check once.** With *Host checks* off, a button beside the switch asks your hosts one time and keeps what they said, dated, until you press it again. Only that click can: detect, a refresh and a new commit reach nothing while the switch is off. Host checks left on still run by themselves, as they did.
+
+### Changed
+
+- **Claude is told not to read a deploy host on its own.** The rules used to send it to the host's CLI to check an env var name; now it asks first, read-only included.
+
 ### Fixed
 
 - **Tool configs and platform files read as "no longer wired in".** `eslint.config.js` is found by its tool and never imported, and `useThing.web.ts` is imported as `useThing`, so both looked unreferenced, and a proven feature flipped between working and broke.
