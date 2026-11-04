@@ -16,8 +16,8 @@ type Stored = { text: string; mtimeMs: number }
 export type Repo = {
   files: Record<string, string>
   run: (argv: readonly string[]) => { exitCode: number; stdout: string } | null
-  /** Whether a URL answers: false is a request that never gets one (offline, DNS, a refused connection). */
-  reachable?: (url: string) => boolean
+  /** Whether a URL answers: false is a request that never gets one (offline, DNS, a timeout); 'refused' fails the way the real host words it. */
+  reachable?: (url: string) => boolean | 'refused'
 }
 
 /** A project on disk in memory, no git unless a repo is given, and a record of the prompts the mod submits. */
@@ -63,7 +63,9 @@ export function world(on: On, repo: Repo | null = null) {
   on('http.fetch', ($, e) => {
     const url = String((e as { url?: unknown }).url ?? e)
     fetched.push(url)
-    if (repo?.reachable?.(url) === false) return { deny: `unreachable ${url}` }
+    const reach = repo?.reachable?.(url)
+    if (reach === 'refused') return { deny: 'ECONNREFUSED: ECONNREFUSED: Unable to connect. Is the computer able to access the url?' }
+    if (reach === false) return { deny: `unreachable ${url}` }
     return { value: { status: 200 } as never }
   })
   on('fs.exists', ($, e) => {

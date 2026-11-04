@@ -143,15 +143,19 @@ export function rabbitHoles(roadmap: Roadmap): { feature: Feature; sessions: num
     .sort((a, b) => b.sessions - a.sessions)
 }
 
-/** What the deployed app said: a status when it answered; no status when it couldn't be reached. */
-export type LiveAnswer = { ok: boolean | null; status: number | null }
+/** What the deployed app said: a status when it answered; refused when its address turned the connection down; neither when nothing came back. */
+export type LiveAnswer = { ok: boolean | null; status: number | null; refused?: boolean }
+
+/** The host names what went wrong only in the message: `... failed: ECONNREFUSED: ...`. */
+export const isConnectionRefused = (error: unknown): boolean => /\bECONNREFUSED\b/.test(error instanceof Error ? error.message : String(error))
 
 /**
- * Whether the deployed app is up, as far as anyone can tell: only an answer can
- * say. No answer (this machine offline, DNS, a refused connection) is unknown,
- * null. A status of 0 is how an earlier version wrote no answer.
+ * Whether the deployed app is up, as far as anyone can tell. An answer says, and
+ * so does a refused connection: the address is there and nothing is serving. No
+ * answer at all (this machine offline, DNS, a timeout) is unknown, null. A status
+ * of 0 is how an earlier version wrote no answer.
  */
-export const liveAnswer = (live: LiveAnswer): boolean | null => (live.status ? live.ok : null)
+export const liveAnswer = (live: LiveAnswer): boolean | null => (live.status ? live.ok : live.refused ? false : null)
 
 export type Alert = { kind: 'broke' | 'down' | 'rabbit' | 'stale' | 'quiet'; label: string; text: string }
 
@@ -171,7 +175,7 @@ export function alertsOf(
     const reason = feature.regressed.reason === 'tests fail' ? `Tests fail since ${ago(feature.regressed.at, nowMs)}.` : `${capital(feature.regressed.reason)}.`
     alerts.push({ kind: 'broke', label: 'Broke', text: `${feature.title}. ${reason}` })
   }
-  if (live && liveAnswer(live) === false) alerts.push({ kind: 'down', label: 'Down', text: `Deployed app answers ${live.status}.` })
+  if (live && liveAnswer(live) === false) alerts.push({ kind: 'down', label: 'Down', text: live.status ? `Deployed app answers ${live.status}.` : 'Deployed app refused the connection.' })
   for (const hole of rabbitHoles(roadmap)) {
     alerts.push({ kind: 'rabbit', label: 'Rabbit hole', text: `${hole.feature.title}. ${hole.sessions} sessions, no progress.` })
   }

@@ -50,7 +50,7 @@ export type PaneData = {
   evidence: Readonly<Record<string, FeatureEvidence>>
   /** What this project lets detection see: a test command, a deploy host, git. */
   capabilities: { tests: boolean; hosts: boolean; git: boolean }
-  live: { url: string; ok: boolean | null; status: number | null } | null
+  live: { url: string; ok: boolean | null; status: number | null; refused?: boolean } | null
   /** What the project-wide evidence says: how screens are drawn, the tests that map nowhere, what's deployed. */
   project: {
     /** No screen could be recognised although features have UI: UI progress is unknown, not 0%. */

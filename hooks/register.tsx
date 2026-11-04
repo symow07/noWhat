@@ -7,7 +7,7 @@
 // detect.ts (what the repository says), reconcile.ts (evidence → states),
 // schema.ts (the file format) and view.tsx (the dashboard).
 
-import { liveAnswer } from './insights'
+import { isConnectionRefused, liveAnswer } from './insights'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
@@ -663,8 +663,8 @@ type EvidenceFile = {
     deploy?: { source: string; commit: string; changed: number } | null
   }
   hosts: HostCheck[]
-  /** ok and status are null when the app couldn't be reached: unknown, not down. */
-  live: { url: string; ok: boolean | null; status: number | null; checked_at: string; commit?: string | null } | null
+  /** ok and status are null when nothing came back: unknown. refused: the address turned the connection down, so down. */
+  live: { url: string; ok: boolean | null; status: number | null; refused?: boolean; checked_at: string; commit?: string | null } | null
   /** The commit the deploy host serves (Railway's deployment metadata), from the last host check. */
   host_deploy?: HostDeploy | null
   /** Pull requests and branches merged on the main line in the last 8 days, with the features they touched. */
@@ -1070,8 +1070,9 @@ async function gatherEvidence($: $, place: Place, roadmap: Roadmap, options: Det
         const response = await $.http.fetch(url)
         // The same answer may say which commit is running: that's what's live.
         live = { url, ok: response.status < 500, status: response.status, checked_at: now, commit: reportedCommit(String(response.text ?? '')) }
-      } catch {
-        live = { url, ok: null, status: null, checked_at: now, commit: null }
+      } catch (error) {
+        // A refused connection is a dead server. Anything else with no answer may be this machine: unknown.
+        live = isConnectionRefused(error) ? { url, ok: false, status: null, refused: true, checked_at: now, commit: null } : { url, ok: null, status: null, checked_at: now, commit: null }
       }
     }
   }
@@ -1244,7 +1245,7 @@ function describeDetection(evidence: EvidenceFile, changes: readonly Change[]): 
       : '',
     project.coverage ? `Coverage: ${project.coverage.paths.join(', ')}.` : '',
     project.deploy ? `Deployed: ${project.deploy.commit}, read from ${project.deploy.source}; ${project.deploy.changed} files changed since.` : '',
-    evidence.live ? `Live: ${evidence.live.url} ${evidence.live.status ? `answered ${evidence.live.status}` : 'unknown (no answer)'}.` : '',
+    evidence.live ? `Live: ${evidence.live.url} ${evidence.live.status ? `answered ${evidence.live.status}` : evidence.live.refused ? 'refused the connection' : 'unknown (no answer)'}.` : '',
     evidence.launch
       ? `Launch: ${evidence.launch.checks.filter(check => check.state === 'ok').length}/${evidence.launch.checks.length} checks pass${evidence.launch.checks.some(check => check.state === 'fail') ? `; failing: ${evidence.launch.checks.filter(check => check.state === 'fail').map(check => check.label).join(', ')}` : ''}.`
       : '',

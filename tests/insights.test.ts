@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { FeatureEvidence } from '../hooks/detect'
-import { alertsOf, catchUp, healthOf, lastActive, rabbitHoles, scopeWeek, unblocks, untouchedDays, waitingOn, weeklySummary } from '../hooks/insights'
+import { alertsOf, catchUp, isConnectionRefused, healthOf, lastActive, rabbitHoles, scopeWeek, unblocks, untouchedDays, waitingOn, weeklySummary } from '../hooks/insights'
 import { type Change, type Feature, type Roadmap, blankFeature, isStale } from '../hooks/schema'
 
 const NOW = '2026-10-12T12:00:00.000Z'
@@ -176,12 +176,21 @@ describe('alerts, rabbit holes, scope and the weekly summary', () => {
 describe("what can't be read is unknown", () => {
   const roadmap = (fields: Partial<Roadmap> = {}) => roadmapOf([], fields)
 
-  test('a deployed app nobody could reach is not Down; one that answered 503 is', () => {
+  test('a deployed app nobody could reach is not Down; one that answered 503 or refused the connection is', () => {
     const down = (live: Parameters<typeof alertsOf>[2]) => alertsOf(roadmap(), {}, live, NOW_MS).filter(alert => alert.kind === 'down')
     expect(down({ ok: null, status: null })).toEqual([])
     // Written by an earlier version: a status of 0 only ever meant no answer.
     expect(down({ ok: false, status: 0 })).toEqual([])
     expect(down({ ok: false, status: 503 })).toHaveLength(1)
+    expect(down({ ok: false, status: null, refused: true })[0]).toMatchObject({ label: 'Down', text: 'Deployed app refused the connection.' })
+  })
+
+  test("a refused connection is told from the rest by the host's own words", () => {
+    // Messages measured from the real $.http.fetch: a closed port, and a name that doesn't resolve.
+    expect(isConnectionRefused(new Error('nowhat: $.http.fetch(http://127.0.0.1:9/) failed: ECONNREFUSED: ECONNREFUSED: Unable to connect. Is the computer able to access the url?'))).toBe(true)
+    expect(isConnectionRefused(new Error('nowhat: $.http.fetch(http://no-such-host.invalid/) failed: ENOTFOUND: getaddrinfo ENOTFOUND no-such-host.invalid'))).toBe(false)
+    expect(isConnectionRefused(new Error('timed out'))).toBe(false)
+    expect(isConnectionRefused(null)).toBe(false)
   })
 
   test('a date nobody can read is no age: not thousands of days, not stalled', () => {

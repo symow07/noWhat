@@ -331,3 +331,31 @@ test('a parked feature says Parked, whatever its states', async ($, on) => {
   expect(labels).toContain('Parked')
   expect(labels).not.toContain('UI ahead')
 })
+
+test('the alert strip says Down for a refused connection, not for a request that got no answer', async ($, on) => {
+  const w = await sample($, on)
+  const evidence = JSON.parse(w.files.get(EVIDENCE)?.text ?? 'null') ?? {
+    version: 2,
+    checked_at: '2026-10-12T20:00:00.000Z',
+    hosts_checked_at: null,
+    project: { languages: [], frameworks: [], hosts: [], test_commands: [], tests: [], file_count: 1, screens: 0, routes: 0, git: true },
+    hosts: [],
+    live: null,
+    test_runs: [],
+    test_results: {},
+    features: {},
+  }
+  const base = { url: 'https://app.example.com', checked_at: '2026-10-12T20:00:00.000Z', commit: null }
+  let stamp = 100
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const showing = async (live: Record<string, unknown>) => {
+      w.files.set(EVIDENCE, { text: JSON.stringify({ ...evidence, live: { ...base, ...live } }), mtimeMs: (stamp += 1) })
+      await ui.press({ key: 'tab:features' })
+      return ui.find({ type: 'Text', text: /^Down:/ })
+    }
+    expect(await showing({ ok: null, status: null })).toBeUndefined()
+    expect(await showing({ ok: false, status: null, refused: true })).toBeDefined()
+    expect(await showing({ ok: null, status: null })).toBeUndefined()
+  }
+})

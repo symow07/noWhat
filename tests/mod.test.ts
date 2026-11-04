@@ -419,7 +419,7 @@ test('a project set up without an answer asks at the top of the sidebar until it
 })
 
 /** A project with a deploy host: a repo whose git and Railway answer, and that says which address it's deployed at. */
-const hostedRepo = (files: Record<string, string>, reachable?: (url: string) => boolean) => ({
+const hostedRepo = (files: Record<string, string>, reachable?: (url: string) => boolean | 'refused') => ({
   files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n', ...files },
   run: (argv: readonly string[]) => {
     const command = argv.join(' ')
@@ -513,5 +513,19 @@ test("a deployed app that can't be reached is unknown: no status of 0, no Down",
   expect(w.fetched.length).toBeGreaterThan(0)
   const live = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').live
   expect(live).toMatchObject({ url: 'https://app.example.com', ok: null, status: null })
-  expect(await ui.find({ type: 'Text', text: 'Down' })).toBeUndefined()
+  expect(live.refused).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Down:/ })).toBeUndefined()
+})
+
+test('a deployed app that refuses the connection is Down: a dead server is an outage', async ($, on) => {
+  const w = world(on, hostedRepo({}, () => 'refused'))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  expect(w.fetched.length).toBeGreaterThan(0)
+  const live = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').live
+  expect(live).toMatchObject({ url: 'https://app.example.com', ok: false, status: null, refused: true })
+  expect(await ui.find({ type: 'Text', text: /^Down:/ })).toBeDefined()
 })
