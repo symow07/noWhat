@@ -37,6 +37,8 @@ test('its pages are screens: the UI style is read first, then pages by what they
   expect(evidence.project.ui_style).toBe('server')
   // Twelve page modules, the layout, and the app that answers text/html.
   expect(evidence.project.pages).toBe(14)
+  // Screens come from the routes: twelve pages and one booking's page; /health and the POST aren't screens.
+  expect(evidence.project.screens).toBe(13)
   for (const id of ['plots', 'bookings', 'reports', 'sign-in']) expect(byId.get(id)?.ui_state).toBe('designed')
   // Wiring came from one read of the files, never a git grep -w that can time out.
   expect(w.ran.some(argv => argv[0] === 'git' && argv[1] === 'grep' && argv.includes('-w'))).toBe(false)

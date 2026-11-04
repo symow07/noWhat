@@ -50,12 +50,13 @@ export type PaneData = {
   evidence: Readonly<Record<string, FeatureEvidence>>
   /** What this project lets detection see: a test command, a deploy host, git. */
   capabilities: { tests: boolean; hosts: boolean; git: boolean }
-  live: { url: string; ok: boolean; status: number } | null
+  live: { url: string; ok: boolean | null; status: number | null } | null
   /** What the project-wide evidence says: how screens are drawn, the tests that map nowhere, what's deployed. */
   project: {
     /** No screen could be recognised although features have UI: UI progress is unknown, not 0%. */
     uiKnown: boolean
-    screens: number
+    /** Null with no evidence to count them from. */
+    screens: number | null
     tests: number
     unmappedTests: number
     /** A deploy host is configured, so "live" means something here. */
@@ -223,12 +224,13 @@ function rule(el: Table, cells: number) {
   return <Text dimColor>{'─'.repeat(Math.max(6, cells))}</Text>
 }
 
-const pct = (value: number | null) => (value === null ? '–' : `${value}%`)
+const pct = (value: number | null) => (value === null ? 'unknown' : `${value}%`)
 
 /** "checked just now", "checked 40s ago", "checked 3m ago": coarse, so the line doesn't flicker. */
 export function checkedLabel(checkedAt: string | null, nowMs: number): string {
   if (checkedAt === null) return 'not checked yet'
   const seconds = Math.max(0, Math.floor((nowMs - Date.parse(checkedAt)) / 1000))
+  if (Number.isNaN(seconds)) return 'checked: unknown'
   if (seconds < 10) return 'checked just now'
   if (seconds < 60) return `checked ${Math.floor(seconds / 10) * 10}s ago`
   if (seconds < 3600) return `checked ${Math.floor(seconds / 60)}m ago`
@@ -346,7 +348,7 @@ function header(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
           </Button>
         </Box>
       </Box>
-      {bar(el, p.built ?? 0, ACCENT, columns, `Built ${pct(p.built)}`)}
+      {p.built !== null && bar(el, p.built, ACCENT, columns, `Built ${pct(p.built)}`)}
       <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
         <Text>
           <Text {...(dot.color ? { color: dot.color } : { dimColor: true })}>●</Text>
@@ -975,7 +977,7 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
                       {mp.builtCount} of {mp.planned} built · {pct(mp.built)}
                     </Text>
                   </Box>
-                  {bar(el, mp.built ?? 0, ACCENT, columns - 2, `${milestone.title} ${pct(mp.built)}`)}
+                  {mp.built !== null && bar(el, mp.built, ACCENT, columns - 2, `${milestone.title} ${pct(mp.built)}`)}
                 </Box>
               )
             })}
@@ -987,9 +989,9 @@ function drawer(el: Table, roadmap: Roadmap, data: PaneData, actions: PaneAction
               </Text>
               <Text dimColor wrap="wrap">
                 {p.ui === null
-                  ? `No UI features · ${data.project.screens} screens`
+                  ? `No UI features · ${data.project.screens ?? 'unknown'} screens`
                   : data.project.uiKnown
-                    ? `UI ${pct(p.ui)} · ${data.project.screens} screens`
+                    ? `UI ${pct(p.ui)} · ${data.project.screens ?? 'unknown'} screens`
                     : 'UI unknown: no screen could be recognised'}
                 {data.project.uiKnown && p.ui !== null && p.functional !== null && Math.abs(p.ui - p.functional) >= GAP_ALERT
                   ? p.ui > p.functional
@@ -1091,7 +1093,7 @@ function allProjects(el: Table, data: PaneData, actions: PaneActions) {
           <Text dimColor>Not found</Text>
           {gone.map(project => (
             <Text dimColor wrap="wrap">
-              {project.name} · {project.state === 'broken' ? 'nowhat.json has errors' : 'folder or nowhat.json gone'} · {tilde(project.path, data.home)}
+              {project.name} · {project.state === 'unknown' ? "unknown: nowhat.json can't be read" : 'folder or nowhat.json gone'} · {tilde(project.path, data.home)}
             </Text>
           ))}
         </Box>
@@ -1105,8 +1107,9 @@ function projectCard(el: Table, project: ProjectSummary, data: PaneData, actions
   const isOpenCard = data.expandedProject === project.path
   const dot = project.health ? (HEALTH_DOT[project.health.kind] ?? { dim: true }) : { dim: true }
   const inner = Math.max(20, columns - 4)
-  const quiet = project.untouchedDays >= 14
-  const activity = project.untouchedDays === 0 ? 'Active today' : `Active ${ago(new Date(project.lastActiveMs).toISOString(), data.nowMs)}`
+  const quiet = (project.untouchedDays ?? 0) >= 14
+  const activity =
+    project.lastActiveMs === null ? 'Last active unknown' : project.untouchedDays === 0 ? 'Active today' : `Active ${ago(new Date(project.lastActiveMs).toISOString(), data.nowMs)}`
 
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1} key={`project:${project.path}`} {...(quiet ? { borderColor: ALERT } : { borderDimColor: true })}>
@@ -1127,7 +1130,7 @@ function projectCard(el: Table, project: ProjectSummary, data: PaneData, actions
           <Text dimColor> built</Text>
         </Text>,
       )}
-      {bar(el, project.overall ?? 0, ACCENT, inner, `${project.name} ${pct(project.overall)} built`)}
+      {project.overall !== null && bar(el, project.overall, ACCENT, inner, `${project.name} ${pct(project.overall)} built`)}
       <Box flexDirection="row" justifyContent="space-between">
         <Text>
           <Text {...(dot.color ? { color: dot.color } : { dimColor: true })}>●</Text>
@@ -1198,14 +1201,14 @@ function projectDetails(el: Table, project: ProjectSummary, data: PaneData, acti
                   {milestone.done} of {milestone.total} built · {pct(milestone.overall)}
                 </Text>
               </Box>
-              {bar(el, milestone.overall ?? 0, ACCENT, cells - 2, `${milestone.title} ${pct(milestone.overall)}`)}
+              {milestone.overall !== null && bar(el, milestone.overall, ACCENT, cells - 2, `${milestone.title} ${pct(milestone.overall)}`)}
             </Box>
           ))}
         </Box>
       )}
       {project.live !== null && (
         <Box marginTop={1}>
-          <Text dimColor>Deployed app: {project.live ? 'answering' : 'not answering'}</Text>
+          <Text dimColor>Deployed app: {project.live === 'unknown' ? 'unknown' : project.live ? 'answering' : 'not answering'}</Text>
         </Box>
       )}
       <Box flexDirection="column" marginTop={1}>

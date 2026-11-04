@@ -25,6 +25,9 @@ import {
   unsortedFiles,
   deployRefOf,
   mountsIn,
+  mergeCoverage,
+  scanFacts,
+  pageRoutesOf,
   parseCoverage,
   parseMerges,
   railwayDeployOf,
@@ -161,25 +164,24 @@ describe('configuration', () => {
       'SENTRY_AUTH_TOKEN',
     ])
     expect(envNamesFrom(JSON.stringify([{ Name: 'STRIPE_KEY', Digest: 'abc' }]), 'fly')).toEqual(['STRIPE_KEY'])
-    expect(envNamesFrom('# comment\nexport API_URL=http://x\nNEXT_PUBLIC_KEY=1\n', 'dotenv')).toEqual(['API_URL', 'NEXT_PUBLIC_KEY'])
+    expect(envNamesFrom('# comment\nexport API_URL=http://x\nNEXT_PUBLIC_KEY=1\n', 'fly')).toEqual(['API_URL', 'NEXT_PUBLIC_KEY'])
   })
 })
 
 describe('where env names are read', () => {
-  const host = (kind: 'railway' | 'eas' | 'dotenv', ok: boolean, names: string[], side: 'server' | 'client' | 'both' = 'server') => ({
+  const host = (kind: 'railway' | 'eas', ok: boolean, names: string[], side: 'server' | 'client' | 'both' = 'server') => ({
     kind,
-    label: kind === 'dotenv' ? 'local .env' : kind,
+    label: kind,
     side,
     ok,
     names,
   })
 
-  test("a deploy host that couldn't be read is unknown: the local .env doesn't stand in for it", () => {
-    const local = host('dotenv', true, ['DATABASE_URL'], 'both')
+  test("a deploy host that couldn't be read is unknown, and so is having none: a .env answer left in an old evidence file counts for nothing", () => {
+    const local = { kind: 'dotenv' as never, label: 'local .env', side: 'both' as const, ok: true, names: ['DATABASE_URL'] }
     expect(envPresenceOf([host('railway', false, []), local]).server).toBeNull()
     expect(envPresenceOf([host('railway', true, ['LLM_API_KEY']), local]).server?.source).toBe('railway')
-    // With no deploy host at all, the .env is where the keys live.
-    expect(envPresenceOf([local]).server?.source).toBe('local .env')
+    expect(envPresenceOf([local])).toEqual({ server: null, client: null })
   })
 
   test("an EAS build profile's env counts, extends followed; names only", () => {
@@ -526,9 +528,151 @@ describe('unknown is not zero', () => {
     const deployed = featureEvidence(['src/web/orders.ts'], { ...base, deploy: { commit: 'abc1234', changed: new Set(['src/web/orders.ts']) } })
     expect(deployed.live).toBe(false)
     expect(featureEvidence(['src/web/orders.ts'], { ...base, deploy: { commit: 'abc1234', changed: new Set() } }).live).toBe(true)
-    // A report older than the feature's last change says nothing about it.
-    const report = { files: new Map([['src/web/orders.ts', { hit: 3, total: 4 }]]), atMs: Date.parse('2026-10-12T00:00:00Z') }
-    expect(featureEvidence(['src/web/orders.ts'], { ...base, coverage: report }).coverage).toBe(0.75)
-    expect(featureEvidence(['src/web/orders.ts'], { ...base, coverage: { ...report, atMs: Date.parse('2026-10-01T00:00:00Z') } }).coverage).toBeNull()
+    // A report older than the file's last change says nothing about it.
+    const report = (at: string) => ({ files: new Map([['src/web/orders.ts', { hit: 3, total: 4, atMs: Date.parse(at) }]]) })
+    expect(featureEvidence(['src/web/orders.ts'], { ...base, coverage: report('2026-10-12T00:00:00Z') }).coverage).toBe(0.75)
+    expect(featureEvidence(['src/web/orders.ts'], { ...base, coverage: report('2026-10-01T00:00:00Z') }).coverage).toBeNull()
+  })
+
+  test("coverage: each file on its own report's date and its own last change", () => {
+    const at = (day: string) => Date.parse(`2026-10-${day}T00:00:00Z`)
+    const facts = {
+      ...base,
+      activity: new Map([
+        ['web/orders.ts', { last: '2026-10-10T00:00:00Z', recent: 1 }],
+        ['web/cart.ts', { last: '2026-10-10T00:00:00Z', recent: 1 }],
+        ['api/users.ts', { last: '2026-10-05T00:00:00Z', recent: 1 }],
+        ['api/roles.ts', { last: '2026-10-11T00:00:00Z', recent: 1 }],
+      ]),
+      files: new Set(['web/orders.ts', 'web/cart.ts', 'api/users.ts', 'api/roles.ts']),
+    }
+    // Two packages: web's report is fresh, api's is a week old.
+    const merged = mergeCoverage([
+      { path: 'web/coverage/lcov.info', atMs: at('12'), found: new Map([['web/orders.ts', { hit: 3, total: 4 }], ['web/cart.ts', { hit: 1, total: 4 }]]) },
+      { path: 'api/coverage/lcov.info', atMs: at('08'), found: new Map([['api/users.ts', { hit: 2, total: 2 }], ['api/roles.ts', { hit: 2, total: 2 }]]) },
+    ])
+    expect(merged.paths).toEqual(['web/coverage/lcov.info', 'api/coverage/lcov.info'])
+    const coverage = merged
+    // Api's old report doesn't take web's fresh one away.
+    expect(featureEvidence(['web/orders.ts', 'web/cart.ts'], { ...facts, coverage }).coverage).toBe(0.5)
+    // Inside one feature: roles.ts changed after the report, users.ts didn't, and users.ts still counts.
+    expect(featureEvidence(['api/users.ts', 'api/roles.ts'], { ...facts, coverage }).coverage).toBe(1)
+    // Every file newer than its report: nothing can be said.
+    expect(featureEvidence(['api/roles.ts'], { ...facts, coverage }).coverage).toBeNull()
+  })
+})
+
+describe('a server project\'s screens are its page routes', () => {
+  const files = ['src/app.ts', 'src/paths.ts', 'src/api.ts', 'src/orders.ts']
+  const paths = [
+    "export const SETTINGS_HOME = '/settings'",
+    "export const STEPS = ['name', 'price', 'photo'] as const",
+    "export const stepHref = (step: string): string => `${SETTINGS_HOME}/steps/${step}`",
+    "export const TOOLS: Readonly<Record<string, string>> = {",
+    "  export: '/tools/export', import: '/tools/import',",
+    '}',
+  ].join('\n')
+  const orders = "export const renderOrders = () => '<!doctype html><html><body><main><h1>Orders</h1></main></body></html>'\n"
+  const app = [
+    "import { STEPS, SETTINGS_HOME, TOOLS, stepHref } from './paths.js'",
+    "import { renderOrders } from './orders.js'",
+    "const html = (reply) => reply.type('text/html').send('<!doctype html><html></html>')",
+    'export function routes(app) {',
+    // One page in each way a route gets its address.
+    "  app.get('/orders', async (req, reply) => html(reply))",
+    "  app.get('/orders/:id', async (req, reply) => {",
+    "    if (!req.user) return reply.redirect('/login')",
+    '    return html(reply)',
+    '  })',
+    '  app.get(SETTINGS_HOME, async (req, reply) => html(reply))',
+    '  app.get(`${SETTINGS_HOME}/people`, async (req, reply) => html(reply))',
+    '  for (const step of STEPS) {',
+    '    app.get(stepHref(step), async (req, reply) => html(reply))',
+    '  }',
+    '  for (const tool of Object.keys(TOOLS)) {',
+    '    app.get(TOOLS[tool], async (req, reply) => html(reply))',
+    '  }',
+    // None of these is a screen.
+    "  app.post('/orders', async (req, reply) => reply.redirect('/orders'))",
+    "  app.get('/old-orders', async (req, reply) => reply.redirect('/orders'))",
+    "  app.get('/orders/:id/export.csv', async (req, reply) => reply.type('text/csv').send('a,b'))",
+    "  app.get('/orders/:id/receipt', async (req, reply) => reply.type('application/pdf').send(Buffer.alloc(1)))",
+    "  app.get('/assets/:file', async (req, reply) => reply.send(''))",
+    "  app.get('/app/live/orders', async (req, reply) => reply.send({ fresh: true }))",
+    "  app.get('/health', async () => ({ ok: true }))",
+    "  app.get('/connect/stripe/start', async (req, reply) => reply.redirect('https://stripe.example'))",
+    "  app.get('/connect/stripe/callback', async (req, reply) => html(reply))",
+    '}',
+  ].join('\n')
+  const api = "export function api(app) {\n  app.get('/users', async () => ({ users: [] }))\n  app.get('/users/:id', listOne)\n}\n"
+  const texts = new Map([['src/app.ts', app], ['src/paths.ts', paths], ['src/api.ts', api], ['src/orders.ts', orders]])
+
+  test('counted from the routes registered: literal, constant, template and loop', () => {
+    expect(pageRoutesOf(files, texts).sort()).toEqual([
+      '/orders',
+      '/orders/:id',
+      '/settings',
+      '/settings/people',
+      '/settings/steps/name',
+      '/settings/steps/photo',
+      '/settings/steps/price',
+      '/tools/export',
+      '/tools/import',
+    ])
+  })
+
+  test('one file with many routes is many screens; a JSON API is none', () => {
+    expect(scanFacts(files, texts, ['Fastify'], []).pages.size).toBe(2)
+    expect(scanFacts(files, texts, ['Fastify'], []).pageRoutes).toHaveLength(9)
+    expect(pageRoutesOf(['src/api.ts'], new Map([['src/api.ts', api]]))).toEqual([])
+  })
+
+  test('what looked like a page and is not, and what looked like JSON and is a page', () => {
+    const wrapped = [
+      "import { renderAccount, renderTeam, page } from './views.js'",
+      'export function routes(app) {',
+      // Pages drawn through a wrapper, returning an object for it to draw.
+      "  app.get('/account', authed('settings', async (s, req, locale) => ({",
+      "    title: 'Account', bodyHtml: renderAccount(locale),",
+      '  })))',
+      "  app.get('/team', authed('settings', async (s, req, locale) => {",
+      '    const facts = await inTx(async tx => ({ people: await people(tx) }))',
+      '    return renderTeam(facts, locale)',
+      '  }))',
+      "  app.route({ method: 'GET', url: '/orders', handler: async (req, reply) => reply.type('text/html').send(page()) })",
+      // A file, with an HTML page for when it can't be had.
+      "  app.get('/voice/:id', async (req, reply) => {",
+      "    const gone = () => reply.code(404).type('text/html').send(page())",
+      '    const got = await fetchIt(req)',
+      '    if (!got) return gone()',
+      "    return reply.type(got.mime).send(got.bytes)",
+      '  })',
+      "  app.get('/clip/:id', async (req, reply) => {",
+      "    if (!req.user) return reply.code(404).type('text/html').send(page())",
+      "    return reply.header('content-type', 'audio/ogg').send(await clip(req))",
+      '  })',
+      // A catch-all that forwards, whichever way the guard is written.
+      "  app.get('/old/*', async (req, reply) => !req.user ? reply.redirect('/login') : reply.redirect('/new'))",
+      "  app.route({ method: 'POST', url: '/orders/import', handler: async (req, reply) => reply.redirect('/orders') })",
+      '}',
+    ].join('\n')
+    // A list that describes routes registers none, and the GET beside a POST says nothing about the POST.
+    const table = [
+      "export const DESCRIBED = [",
+      "  { method: 'POST', url: '/account/import', action: 'post' },",
+      "  { method: 'GET', url: '/account/listed', action: 'read' },",
+      "  { method: 'POST', url: '/account/close', action: 'post' },",
+      ']',
+      "export const drawn = () => '<!doctype html><html><body><main><h1>Listed</h1></main></body></html>'",
+    ].join('\n')
+    const views = "export const renderAccount = () => '<!doctype html><html><body><main><h1>Account</h1></main></body></html>'\nexport const renderTeam = renderAccount\nexport const page = renderAccount\n"
+    const paths = ['src/routes.ts', 'src/table.ts', 'src/views.ts']
+    expect(pageRoutesOf(paths, new Map([['src/routes.ts', wrapped], ['src/table.ts', table], ['src/views.ts', views]])).sort()).toEqual(['/account', '/orders', '/team'])
+  })
+
+  test('other stacks: Flask renders templates by route, and a file-routed framework keeps its own count', () => {
+    const flask = ["from flask import render_template", "@app.get('/plots')", 'def plots():', "    return render_template('plots.html')", "@app.post('/plots')", 'def add():', "    return redirect('/plots')", "@app.route('/about')", 'def about():', "    return render_template('about.html')"].join('\n')
+    expect(pageRoutesOf(['site/app.py'], new Map([['site/app.py', flask]])).sort()).toEqual(['/about', '/plots'])
+    expect(scanFacts(['app/page.tsx'], new Map([['app/page.tsx', 'export default () => null']]), ['Next.js'], []).pageRoutes).toEqual([])
   })
 })

@@ -13,7 +13,12 @@ export const PRESENTATION = { isFullscreen: false, columns: 100 }
 type Stored = { text: string; mtimeMs: number }
 
 /** A repository for the world: its files, and what its git and test runner answer (null: as if not installed). */
-export type Repo = { files: Record<string, string>; run: (argv: readonly string[]) => { exitCode: number; stdout: string } | null }
+export type Repo = {
+  files: Record<string, string>
+  run: (argv: readonly string[]) => { exitCode: number; stdout: string } | null
+  /** Whether a URL answers: false is a request that never gets one (offline, DNS, a refused connection). */
+  reachable?: (url: string) => boolean
+}
 
 /** A project on disk in memory, no git unless a repo is given, and a record of the prompts the mod submits. */
 export function world(on: On, repo: Repo | null = null) {
@@ -35,6 +40,8 @@ export function world(on: On, repo: Repo | null = null) {
   /** Every process the mod started (argv), and every URL it fetched. */
   const ran: string[][] = []
   const fetched: string[] = []
+  /** Every path the mod asked the disk about: read, stat or exists. */
+  const touched: string[] = []
   /** The project's top-level files, as listing it shows them. */
   const listing = ['PLAN.md']
   const toasts: string[] = []
@@ -54,15 +61,19 @@ export function world(on: On, repo: Repo | null = null) {
     return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('http.fetch', ($, e) => {
-    fetched.push(String((e as { url?: unknown }).url ?? e))
+    const url = String((e as { url?: unknown }).url ?? e)
+    fetched.push(url)
+    if (repo?.reachable?.(url) === false) return { deny: `unreachable ${url}` }
     return { value: { status: 200 } as never }
   })
   on('fs.exists', ($, e) => {
     disk()
+    touched.push(e.path)
     return { value: files.has(e.path) || e.path.includes('/prompts/') }
   })
   on('fs.read', ($, e) => {
     disk()
+    touched.push(e.path)
     // Each prompt file reads as its own name, so a test can tell which one a step used.
     if (e.path.includes('/prompts/')) return { value: `prompt:${e.path.split('/').pop()?.replace('.md', '')}` }
     const stored = files.get(e.path)
@@ -75,6 +86,7 @@ export function world(on: On, repo: Repo | null = null) {
   })
   on('fs.stat', ($, e) => {
     disk()
+    touched.push(e.path)
     const stored = files.get(e.path)
     return stored
       ? { value: { kind: 'file' as const, size: stored.text.length, mtimeMs: stored.mtimeMs, isLink: false } }
@@ -123,6 +135,7 @@ export function world(on: On, repo: Repo | null = null) {
     opened,
     ran,
     fetched,
+    touched,
     listing,
     breakDisk() {
       broken = true

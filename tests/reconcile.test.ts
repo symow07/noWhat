@@ -196,6 +196,23 @@ describe('unknown is not zero', () => {
     expect(reconcile(roadmapOf([working]), { a: unmapped({ files: [file({ wired: null, code: true })] }) }, NOW).changes).toEqual([])
   })
 
+  test('a block read off the local .env lifts even when every file is shared with another feature', () => {
+    const blocked = feature({
+      status: 'blocked',
+      blocked_on: 'you',
+      blocker_reason: 'Missing in local .env: LLM_API_KEY',
+      auto_blocked: { from: 'done' },
+      related_files: ['src/shared.ts'],
+    })
+    const other = { ...feature({ status: 'in_progress' }), id: 'b', related_files: ['src/shared.ts'] }
+    const unknown = ev({ env_required: ['LLM_API_KEY'], env_missing: [], env_source: null, files: [file({ path: 'src/shared.ts' })] })
+    const lifted = reconcile(roadmapOf([blocked, other]), { a: unknown, b: unknown }, NOW).roadmap.features[0]
+    expect(lifted).toMatchObject({ status: 'done', blocked_on: null, blocker_reason: null, auto_blocked: null })
+    // What someone pinned stays as they pinned it.
+    const pinned = reconcile(roadmapOf([{ ...blocked, pinned: true }, other]), { a: unknown, b: unknown }, NOW).roadmap.features[0]
+    expect(pinned?.status).toBe('blocked')
+  })
+
   test("a block read off the local .env lifts once the deploy host is what's asked, even unreadable", () => {
     const blocked = feature({
       status: 'blocked',

@@ -22,7 +22,7 @@ const SCAN_FILE_BYTES = 8_000_000
 
 type Previous = {
   hosts?: d.HostNames[]
-  live?: { ok: boolean; status: number; commit?: string | null } | null
+  live?: { ok: boolean | null; status: number | null; commit?: string | null } | null
   host_deploy?: { commit: string; source: string } | null
   launch?: { store_commit?: string | null } | null
   test_runs?: { ok: boolean | null }[]
@@ -114,7 +114,7 @@ export function detectFolder(root: string, nowMs = Date.now()): FolderDetection 
   // The last host answers, with what the next host check adds from the repository (an EAS build profile's names).
   const easJson = files.find(path => /(^|\/)eas\.json$/.test(path))
   const profile = easJson ? d.easProfileNames(read(easJson)) : []
-  const hosts = (allowed ? (previous.hosts ?? []) : []).map(host =>
+  const hosts = d.withoutLocalEnv(allowed ? (previous.hosts ?? []) : []).map(host =>
     host.kind === 'eas' && host.ok ? { ...host, names: [...new Set([...host.names, ...profile])] } : host,
   )
   const live = allowed ? (previous.live ?? null) : null
@@ -123,9 +123,7 @@ export function detectFolder(root: string, nowMs = Date.now()): FolderDetection 
   const suite = d.suiteOf(testRuns, testResults)
 
   // Coverage: the newest report in each package.
-  const coverageFiles: d.CoverageMap = new Map()
-  const coveragePaths: string[] = []
-  let coverageAt = Number.POSITIVE_INFINITY
+  const coverageReports: Parameters<typeof d.mergeCoverage>[0][number][] = []
   for (const dir of [...new Set(['', ...inventory.testCommands.map(command => command.dir)])]) {
     const found = d.COVERAGE_REPORTS.map(report => (dir === '' ? report : `${dir}/${report}`))
       .filter(path => existsSync(`${root}/${path}`))
@@ -133,11 +131,9 @@ export function detectFolder(root: string, nowMs = Date.now()): FolderDetection 
       .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
     if (!found) continue
     const parsed = d.parseCoverage(found.path, read(found.path), root, fileSet)
-    if (parsed.size === 0) continue
-    for (const [path, seen] of parsed) coverageFiles.set(path, seen)
-    coveragePaths.push(found.path)
-    coverageAt = Math.min(coverageAt, found.mtimeMs)
+    if (parsed.size > 0) coverageReports.push({ path: found.path, atMs: found.mtimeMs, found: parsed })
   }
+  const merged = coverageReports.length > 0 ? d.mergeCoverage(coverageReports) : null
 
   const marker = d.deployRefOf(git(['for-each-ref', '--format=%(refname)%09%(objectname)%09%(creatordate:iso-strict)', 'refs/heads', 'refs/remotes', 'refs/tags']) ?? '')
   const deployed =
@@ -164,7 +160,7 @@ export function detectFolder(root: string, nowMs = Date.now()): FolderDetection 
     env: d.envPresenceOf(hosts),
     testResults,
     suite,
-    coverage: coverageFiles.size > 0 ? { files: coverageFiles, atMs: coverageAt } : null,
+    coverage: merged,
     deploy,
   }
   const evidence: Record<string, d.FeatureEvidence> = {}
@@ -195,13 +191,13 @@ export function detectFolder(root: string, nowMs = Date.now()): FolderDetection 
       complete,
       scanMs,
       uiStyle: scan.uiStyle,
-      screens: new Set([...inventory.screens, ...scan.pages]).size,
+      screens: d.screenCount(inventory.screens, scan.pages, scan.pageRoutes),
       pages: scan.pages.size,
       routes: scan.routes.length,
       tests: testFiles.length,
       unmapped: testFiles.filter(test => !mapped.has(test)),
       suite,
-      coverage: coveragePaths,
+      coverage: merged?.paths ?? [],
       deploy: deploy ? { source: deploy.source, commit: deploy.commit.slice(0, 7), changed: deploy.changed.size } : null,
       hosts: hosts.map(host => `${host.label}: ${host.ok ? `${host.names.length} names` : 'not read'}`),
     },
@@ -232,7 +228,7 @@ export function figures(result: FolderDetection, nowMs = Date.now()) {
       live: liveOf(roadmap, result.evidence).live,
       milestones: roadmap.milestones.map(milestone => {
         const mp = progressOf(roadmap.features.filter(feature => feature.milestone === milestone.id))
-        return `${milestone.title}: ${mp.builtCount} of ${mp.planned} built · ${mp.built ?? '–'}%`
+        return `${milestone.title}: ${mp.builtCount} of ${mp.planned} built · ${mp.built === null ? 'unknown' : `${mp.built}%`}`
       }),
       week: scopeWeek(roadmap, nowMs, result.merged),
       summary: weeklySummary(roadmap, result.evidence, nowMs, result.merged),
@@ -249,12 +245,13 @@ if (import.meta.main) {
   if (flag === '--json') console.log(JSON.stringify({ project: result.project, passes: result.passes, ...shown }, null, 2))
   else {
     const { before, after } = shown
-    const ui = (value: number | null) => (result.project.screens === 0 && after.ui === 0 ? 'unknown' : `${value ?? '–'}%`)
+    const known = (value: number | null) => (value === null ? 'unknown' : `${value}%`)
+    const ui = (value: number | null) => (result.project.screens === 0 && after.ui === 0 ? 'unknown' : known(value))
     console.log(
       [
         `${result.roadmap.name}: ${result.project.files} files, ${result.project.scanned} read in ${result.project.scanMs}ms${result.project.complete ? '' : ' (not all)'}`,
-        `Before (as stored): ${before.oldOverall ?? '–'}% · UI ${before.ui ?? '–'}% · works ${before.functional ?? '–'}% · ${before.statuses}`,
-        `After: built ${after.built ?? '–'}% (${after.builtCount} of ${after.planned}) · live ${after.live === null ? 'unknown' : `${after.live}%`} · UI ${ui(after.ui)} (${result.project.uiStyle}, ${result.project.screens} screens, ${result.project.pages} pages) · ${after.statuses}`,
+        `Before (as stored): ${known(before.oldOverall)} · UI ${known(before.ui)} · works ${known(before.functional)} · ${before.statuses}`,
+        `After: built ${known(after.built)} (${after.builtCount} of ${after.planned}) · live ${after.live === null ? 'unknown' : `${after.live}%`} · UI ${ui(after.ui)} (${result.project.uiStyle}, ${result.project.screens} screens, ${result.project.pages} pages) · ${after.statuses}`,
         `Rows: ${after.pills}`,
         `Health: ${before.health.label} → ${after.health.label} (${after.health.detail})`,
         ...after.milestones.map(line => `Milestone ${line}`),

@@ -73,9 +73,9 @@ describe('a project card', () => {
     expect(card.health?.kind).toBe('stalled')
   })
 
-  test('a missing or broken features file still gets a card, marked as such', () => {
+  test("a missing or unreadable features file still gets a card, marked as such", () => {
     expect(summarize(input(null), NOW_MS).state).toBe('missing')
-    expect(summarize(input(null, { exists: true }), NOW_MS).state).toBe('broken')
+    expect(summarize(input(null, { exists: true }), NOW_MS).state).toBe('unknown')
   })
 })
 
@@ -85,5 +85,16 @@ describe('the list', () => {
     const old = summarize(input(roadmapOf([], { name: 'Old', last_touched: daysAgo(9) }), { path: '/work/old' }), NOW_MS)
     const gone = summarize(input(null, { path: '/work/gone', name: 'gone' }), NOW_MS)
     expect(sortProjects([gone, old, fresh]).map(card => card.name)).toEqual(['Fresh', 'Old', 'gone'])
+  })
+})
+
+describe("a project that can't be read", () => {
+  test('is unknown: no zeros for what nobody could count', () => {
+    const summary = summarize(input(null, { exists: true }), NOW_MS)
+    expect(summary).toMatchObject({ state: 'unknown', features: null, done: null, lastActiveMs: null, untouchedDays: null, overall: null })
+  })
+  test('sorts with the gone ones, after the projects that can be read', () => {
+    const summaries = [summarize(input(null, { exists: true, path: '/a', name: 'A' }), NOW_MS), summarize(input(roadmapOf([feature('a')]), { path: '/b', name: 'B' }), NOW_MS)]
+    expect(sortProjects(summaries).map(one => one.name)).toEqual(['App', 'A'])
   })
 })

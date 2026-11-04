@@ -325,3 +325,101 @@ test('a project set up without an answer asks at the top of the sidebar until it
   expect(JSON.parse(w.files.get(REGISTRY)?.text ?? '{}').projects[0]).toMatchObject({ check_hosts: false })
   expect(await ui.find({ type: 'Text', text: 'Off' })).toBeDefined()
 })
+
+/** A project with a deploy host: a repo whose git and Railway answer, and that says which address it's deployed at. */
+const hostedRepo = (files: Record<string, string>, reachable?: (url: string) => boolean) => ({
+  files: { 'railway.json': '{}', 'src/login.tsx': 'export default function Login() {}\n', ...files },
+  run: (argv: readonly string[]) => {
+    const command = argv.join(' ')
+    if (command === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: `${['railway.json', 'src/login.tsx', ...Object.keys(files)].join('\n')}\n` }
+    if (command === 'railway variables --json') return { exitCode: 0, stdout: '{"RAILWAY_PUBLIC_DOMAIN":"app.example.com"}' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  },
+  ...(reachable ? { reachable } : {}),
+})
+
+const PANE = { title: 'noWhat', isFocused: false, bodyColumns: 48, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 120 }, view: {} }
+const ENV_FILE = /(^|\/)\.env(\.[^/]+)?$/
+
+test('the local .env is never opened: not read, not stat-ed, not searched, and blocks nothing', async ($, on) => {
+  const secret = 'API_KEY=hunter2\nOTHER_KEY=swordfish\n'
+  const w = world(on, hostedRepo({ '.env': secret, '.env.local': secret, '.env.production': secret, 'apps/api/.env': secret }))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'login', title: 'Login', status: 'done', functional_state: 'partial', related_files: ['src/login.tsx'], needs_config: ['STRIPE_KEY'] }],
+  } as never)
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+
+  expect(w.touched.filter(path => ENV_FILE.test(path))).toEqual([])
+  // git grep reads what it searches, so a committed .env is left out of every search.
+  const greps = w.ran.filter(argv => argv[0] === 'git' && argv[1] === 'grep')
+  expect(greps.length).toBeGreaterThan(0)
+  for (const grep of greps) expect(grep.filter(arg => arg.includes('.env'))).toEqual([':(exclude,glob)**/.env', ':(exclude,glob)**/.env.*'])
+  const evidence = w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? ''
+  expect(evidence).not.toContain('API_KEY')
+  expect(evidence).not.toContain('local .env')
+  // Railway was asked, and Railway is what the block names.
+  expect(w.roadmap().features[0].blocker_reason).toBe('Missing in Railway: STRIPE_KEY')
+})
+
+test('with no deploy host a key is unknown: a .env without it blocks nothing', async ($, on) => {
+  const answers = (argv: readonly string[]) => {
+    if (argv.join(' ') === 'git ls-files --cached --others --exclude-standard') return { exitCode: 0, stdout: '.env\nsrc/login.tsx\n' }
+    return argv[0] === 'git' && argv[1] !== 'rev-parse' ? { exitCode: argv[1] === 'grep' ? 1 : 0, stdout: '' } : null
+  }
+  const w = world(on, { files: { '.env': 'OTHER_KEY=swordfish\n', 'src/login.tsx': 'export default function Login() {}\n' }, run: answers })
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'login', title: 'Login', status: 'done', functional_state: 'partial', related_files: ['src/login.tsx'], needs_config: ['STRIPE_KEY'] }],
+  } as never)
+  await $.tool.call({ tool: 'mcp__nowhat__detect', tool_use_id: 'd1' })
+  expect(w.touched.filter(path => ENV_FILE.test(path))).toEqual([])
+  expect(w.roadmap().features[0]).toMatchObject({ status: 'done', blocker_reason: null })
+  const evidence = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}')
+  expect(evidence.features.login).toMatchObject({ env_required: ['STRIPE_KEY'], env_missing: [], env_source: null })
+  expect(evidence.hosts).toEqual([])
+})
+
+test('with nothing to measure the pane says unknown, and draws no empty bar', async ($, on) => {
+  const w = world(on, hostedRepo({}, () => true))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await $.tool.call({
+    tool: 'mcp__nowhat__setup',
+    tool_use_id: 's1',
+    name: 'Sample',
+    features: [{ id: 'later', title: 'Later', idea: true }],
+  } as never)
+  expect(w.roadmap().features[0]?.idea).toBe(true)
+  expect(await ui.find({ type: 'Text', text: 'unknown' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '0%' })).toBeUndefined()
+  // A bar says its value in its alt; the pane's hairlines have none.
+  const bars = (await ui.findAll({ type: 'Svg' })).filter(svg => /built/i.test(String(svg.props.alt)))
+  expect(bars).toEqual([])
+})
+
+test("a deployed app that can't be reached is unknown: no status of 0, no Down", async ($, on) => {
+  const w = world(on, hostedRepo({}, () => false))
+  await $.session.start({ cwd: ROOT, surface: null, isInteractive: false })
+  await nowhat($)
+  const ui = await $.ui.mount({ plugin: 'nowhat', surface: 'desktop', component: 'Pane', requestId: 'nowhat', props: PANE })
+  await ui.press({ key: 'hosts:yes' })
+  await $.tool.call({ tool: 'mcp__nowhat__setup', tool_use_id: 's1', name: 'Sample', features: FEATURES } as never)
+  expect(w.fetched.length).toBeGreaterThan(0)
+  const live = JSON.parse(w.files.get(`${ROOT}/.claude/nowhat/evidence.json`)?.text ?? '{}').live
+  expect(live).toMatchObject({ url: 'https://app.example.com', ok: null, status: null })
+  expect(await ui.find({ type: 'Text', text: 'Down' })).toBeUndefined()
+})

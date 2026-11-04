@@ -85,8 +85,8 @@ export function signalsOf(ev: FeatureEvidence | undefined): string[] {
  *    feature) changed in STARTED_DAYS days is in progress. Finished: an in-progress feature
  *    that is proven and has no uncommitted edits is done, unless Claude set it in progress.
  * 4. Config: required env vars missing on the deploy target block it on the user; when they
- *    appear, the block detection made lifts and the status it had comes back. A block read
- *    off the local .env lifts once the deploy host is what's checked (or nothing can be).
+ *    appear, the block detection made lifts and the status it had comes back. A block an
+ *    earlier version read off the local .env always lifts: that file is no evidence.
  * 5. Regression: "working" taken away marks the feature as broke, with why; working again clears it.
  * A pinned feature is left exactly as the person set it, and a parked one keeps its status.
  * Done is never taken back: recorded done with nothing proving it shows as unconfirmed.
@@ -101,7 +101,9 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
   for (const feature of roadmap.features) for (const path of feature.related_files) owners.set(path, (owners.get(path) ?? 0) + 1)
   const isOwn = (path: string) => owners.get(path) === 1
 
-  const features = roadmap.features.map(original => {
+  const features = roadmap.features.map(stored => {
+    // First, whatever its files: nothing below would lift this for a feature whose files are all shared.
+    const original = liftedFromLocalEnv(stored, now, changes)
     const ev = evidence[original.id]
     if (!ev || original.related_files.length === 0 || original.pinned) return original
     if (!original.related_files.some(isOwn)) return original
@@ -168,10 +170,7 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
         feature.blocker_reason = reason
         feature.auto_blocked = { ...feature.auto_blocked, source: ev.env_source }
       }
-    } else if (
-      feature.auto_blocked &&
-      (ev.env_source !== null || ev.env_required.length === 0 || (blockedFrom(feature) === LOCAL_ENV && ev.env_source !== LOCAL_ENV))
-    ) {
+    } else if (feature.auto_blocked && (ev.env_source !== null || ev.env_required.length === 0)) {
       const back = feature.auto_blocked.from
       setStatus(back)
       feature.blocked_on = null
@@ -193,6 +192,14 @@ export function reconcile(roadmap: Roadmap, evidence: Evidence, now: string): { 
     roadmap: { ...roadmap, features, recent_changes: keepChanges([...[...changes].reverse(), ...roadmap.recent_changes], now) },
     changes,
   }
+}
+
+/** The feature without a block read off the local .env; pinned ones are left as the person set them. */
+function liftedFromLocalEnv(feature: Feature, now: string, changes: Change[]): Feature {
+  if (!feature.auto_blocked || feature.pinned || blockedFrom(feature) !== LOCAL_ENV) return feature
+  const to = feature.auto_blocked.from
+  changes.push({ at: now, id: feature.id, title: feature.title, field: 'status', from: feature.status, to, source: 'detected' })
+  return { ...feature, status: to, status_by: 'detected', blocked_on: null, blocker_reason: null, auto_blocked: null, progress_at: now }
 }
 
 /** Where a detected block's missing names were read: recorded since 0.4, read off its reason before. */

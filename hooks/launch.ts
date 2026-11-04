@@ -143,12 +143,13 @@ export function launchChecks(facts: LaunchFacts): LaunchCheck[] {
     add(
       'privacy',
       'Privacy policy',
-      status === null ? 'unknown' : status >= 200 && status < 400 ? 'ok' : 'fail',
-      status === null
-        ? `Not checked yet · ${shortUrl(facts.privacy.url)}`
+      // No answer is unknown; a status of 0 is how an earlier version wrote that.
+      !status ? 'unknown' : status >= 200 && status < 400 ? 'ok' : 'fail',
+      !status
+        ? `No answer yet · ${shortUrl(facts.privacy.url)}`
         : status >= 200 && status < 400
           ? `Loads · ${shortUrl(facts.privacy.url)}`
-          : `${status ? `Answers ${status}` : "Doesn't load"} · ${shortUrl(facts.privacy.url)}`,
+          : `Answers ${status} · ${shortUrl(facts.privacy.url)}`,
     )
   } else if (route && facts.kind === 'web') add('privacy', 'Privacy policy', 'ok', `${name(route)} page`)
   else add('privacy', 'Privacy policy', 'fail', facts.kind === 'app' ? 'No URL found' : 'No page found')
